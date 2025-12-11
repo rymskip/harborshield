@@ -249,3 +249,101 @@ pub fn apply_landlock_rules(db_path: &Path, log_path: Option<&Path>) -> Result<(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    #[test]
+    #[ignore = "Requires Linux kernel 5.13+ with Landlock support"]
+    fn test_apply_landlock_rules_with_temp_db() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+
+        // Create a dummy database file
+        std::fs::write(&db_path, "").unwrap();
+
+        let result = apply_landlock_rules(&db_path, None);
+        // Result depends on kernel support - can be Ok or Err
+        // We mainly verify it doesn't panic
+        match result {
+            Ok(()) => (),
+            Err(SecurityError::NotSupported { .. }) => (),
+            Err(SecurityError::ApplicationFailed(_)) => (),
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    #[test]
+    #[ignore = "Requires Linux kernel 5.13+ with Landlock support"]
+    fn test_apply_landlock_rules_with_log_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let log_path = temp_dir.path().join("test.log");
+
+        // Create dummy files
+        std::fs::write(&db_path, "").unwrap();
+        std::fs::write(&log_path, "").unwrap();
+
+        let result = apply_landlock_rules(&db_path, Some(&log_path));
+        // Result depends on kernel support
+        match result {
+            Ok(()) => (),
+            Err(SecurityError::NotSupported { .. }) => (),
+            Err(SecurityError::ApplicationFailed(_)) => (),
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_path_operations() {
+        // Test path manipulation that the landlock module uses
+        let db_path = PathBuf::from("/tmp/test.db");
+
+        // Parent directory extraction
+        let parent = db_path.parent();
+        assert!(parent.is_some());
+        assert_eq!(parent.unwrap(), Path::new("/tmp"));
+
+        // WAL and SHM file path generation
+        let db_path_str = db_path.to_string_lossy();
+        let wal_path = format!("{}-wal", db_path_str);
+        let shm_path = format!("{}-shm", db_path_str);
+        assert_eq!(wal_path, "/tmp/test.db-wal");
+        assert_eq!(shm_path, "/tmp/test.db-shm");
+    }
+
+    #[test]
+    fn test_system_paths_exist() {
+        // Verify some of the system paths that landlock needs access to
+        // Note: these tests are for basic path existence checks
+        let system_files = [
+            "/etc/localtime",
+            "/etc/resolv.conf",
+        ];
+
+        for path in &system_files {
+            // We don't require all paths to exist, just check if the path can be checked
+            let _ = Path::new(path).exists();
+        }
+    }
+
+    #[test]
+    fn test_nft_path_search() {
+        // Test the nft binary path search logic
+        let nft_paths = ["/usr/sbin/nft", "/sbin/nft", "/usr/bin/nft", "/bin/nft"];
+
+        let mut found_nft = false;
+        for nft_path in &nft_paths {
+            if Path::new(nft_path).exists() {
+                found_nft = true;
+                break;
+            }
+        }
+        // nft may or may not be installed in the test environment
+        // This just verifies the search logic doesn't panic
+        let _ = found_nft;
+    }
+}

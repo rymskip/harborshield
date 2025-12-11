@@ -1287,3 +1287,112 @@ fn get_syscall_name(syscall: i64) -> &'static str {
         _ => "unknown",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_syscall_name_read() {
+        assert_eq!(get_syscall_name(syscalls::READ), "read");
+    }
+
+    #[test]
+    fn test_get_syscall_name_write() {
+        assert_eq!(get_syscall_name(syscalls::WRITE), "write");
+    }
+
+    #[test]
+    fn test_get_syscall_name_open() {
+        assert_eq!(get_syscall_name(syscalls::OPEN), "open");
+    }
+
+    #[test]
+    fn test_get_syscall_name_close() {
+        assert_eq!(get_syscall_name(syscalls::CLOSE), "close");
+    }
+
+    #[test]
+    fn test_get_syscall_name_socket() {
+        assert_eq!(get_syscall_name(syscalls::SOCKET), "socket");
+    }
+
+    #[test]
+    fn test_get_syscall_name_clone() {
+        assert_eq!(get_syscall_name(syscalls::CLONE), "clone");
+    }
+
+    #[test]
+    fn test_get_syscall_name_execve() {
+        assert_eq!(get_syscall_name(syscalls::EXECVE), "execve");
+    }
+
+    #[test]
+    fn test_get_syscall_name_exit() {
+        assert_eq!(get_syscall_name(syscalls::EXIT), "exit");
+    }
+
+    #[test]
+    fn test_get_syscall_name_epoll_create1() {
+        assert_eq!(get_syscall_name(syscalls::EPOLL_CREATE1), "epoll_create1");
+    }
+
+    #[test]
+    fn test_get_syscall_name_getrandom() {
+        assert_eq!(get_syscall_name(syscalls::GETRANDOM), "getrandom");
+    }
+
+    #[test]
+    fn test_get_syscall_name_clone3() {
+        assert_eq!(get_syscall_name(syscalls::CLONE3), "clone3");
+    }
+
+    #[test]
+    fn test_get_syscall_name_unknown() {
+        assert_eq!(get_syscall_name(99999), "unknown");
+    }
+
+    #[test]
+    fn test_get_syscall_name_negative() {
+        assert_eq!(get_syscall_name(-1), "unknown");
+    }
+
+    #[test]
+    fn test_syscall_constants_basic() {
+        // Verify some basic syscall number constants
+        assert_eq!(syscalls::READ, 0);
+        assert_eq!(syscalls::WRITE, 1);
+        assert_eq!(syscalls::OPEN, 2);
+        assert_eq!(syscalls::CLOSE, 3);
+    }
+
+    #[test]
+    fn test_syscall_constants_network() {
+        // Verify network syscall constants
+        assert_eq!(syscalls::SOCKET, 41);
+        assert_eq!(syscalls::CONNECT, 42);
+        assert_eq!(syscalls::ACCEPT, 43);
+        assert_eq!(syscalls::BIND, 49);
+        assert_eq!(syscalls::LISTEN, 50);
+    }
+
+    #[test]
+    fn test_syscall_constants_process() {
+        // Verify process management syscall constants
+        assert_eq!(syscalls::FORK, 57);
+        assert_eq!(syscalls::VFORK, 58);
+        assert_eq!(syscalls::EXECVE, 59);
+        assert_eq!(syscalls::EXIT, 60);
+        assert_eq!(syscalls::WAIT4, 61);
+        assert_eq!(syscalls::KILL, 62);
+    }
+
+    #[test]
+    fn test_syscall_constants_epoll() {
+        // Verify epoll syscall constants
+        assert_eq!(syscalls::EPOLL_CREATE, 213);
+        assert_eq!(syscalls::EPOLL_WAIT, 232);
+        assert_eq!(syscalls::EPOLL_CTL, 233);
+        assert_eq!(syscalls::EPOLL_CREATE1, 291);
+    }
+}

@@ -101,3 +101,52 @@ pub fn list_current_capabilities() -> Result<String> {
 
     Ok(output)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_list_current_capabilities_returns_ok() {
+        // This test verifies that list_current_capabilities can be called
+        // and returns a valid result (the content depends on the execution context)
+        let result = list_current_capabilities();
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        // The output should contain the capability set names
+        assert!(output.contains("Permitted capabilities:"));
+        assert!(output.contains("Effective capabilities:"));
+        assert!(output.contains("Inheritable capabilities:"));
+    }
+
+    #[test]
+    fn test_list_current_capabilities_format() {
+        let result = list_current_capabilities().unwrap();
+        // Should have newlines between each capability set
+        let lines: Vec<&str> = result.lines().collect();
+        assert!(lines.len() >= 3);
+    }
+
+    #[test]
+    #[ignore = "Requires root or CAP_NET_ADMIN capability"]
+    fn test_check_required_capabilities_with_cap_net_admin() {
+        // This test only passes when run with CAP_NET_ADMIN
+        let result = check_required_capabilities();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_check_required_capabilities_error_type() {
+        // When running without CAP_NET_ADMIN, we should get a MissingCapability error
+        // or a CapabilityCheck error if we can't read capabilities at all
+        let result = check_required_capabilities();
+        if result.is_err() {
+            let err = result.unwrap_err();
+            assert!(matches!(
+                err,
+                SecurityError::MissingCapability { .. } | SecurityError::CapabilityCheck { .. }
+            ));
+        }
+        // If it succeeds, the test is running with elevated privileges
+    }
+}

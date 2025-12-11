@@ -223,3 +223,70 @@ pub fn set_active_rules(count: u64) {
 pub fn record_rule_apply_duration(duration: std::time::Duration) {
     metrics::histogram!("harborshield_rule_apply_duration_seconds").record(duration.as_secs_f64());
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    // Note: These tests verify the metric helper functions don't panic.
+    // The actual metric recording depends on the metrics recorder being installed.
+
+    #[test]
+    fn test_increment_rules_applied_no_panic() {
+        // This should not panic even without a metrics recorder
+        increment_rules_applied();
+    }
+
+    #[test]
+    fn test_increment_containers_tracked_no_panic() {
+        // This should not panic even without a metrics recorder
+        increment_containers_tracked();
+    }
+
+    #[test]
+    fn test_increment_errors_no_panic() {
+        // This should not panic even without a metrics recorder
+        increment_errors();
+    }
+
+    #[test]
+    fn test_set_active_containers_no_panic() {
+        // This should not panic even without a metrics recorder
+        set_active_containers(0);
+        set_active_containers(5);
+        set_active_containers(100);
+    }
+
+    #[test]
+    fn test_set_active_rules_no_panic() {
+        // This should not panic even without a metrics recorder
+        set_active_rules(0);
+        set_active_rules(10);
+        set_active_rules(1000);
+    }
+
+    #[test]
+    fn test_record_rule_apply_duration_no_panic() {
+        // This should not panic even without a metrics recorder
+        record_rule_apply_duration(Duration::from_secs(0));
+        record_rule_apply_duration(Duration::from_millis(100));
+        record_rule_apply_duration(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_record_rule_apply_duration_subsecond() {
+        // Verify subsecond durations are handled correctly
+        let duration = Duration::from_millis(500);
+        assert_eq!(duration.as_secs_f64(), 0.5);
+        record_rule_apply_duration(duration);
+    }
+
+    #[test]
+    fn test_record_rule_apply_duration_large_value() {
+        // Verify large durations are handled correctly
+        let duration = Duration::from_secs(3600); // 1 hour
+        assert_eq!(duration.as_secs_f64(), 3600.0);
+        record_rule_apply_duration(duration);
+    }
+}

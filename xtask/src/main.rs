@@ -108,11 +108,7 @@ fn main() -> Result<()> {
 fn cmd_dev(build: bool, test: bool) -> Result<()> {
     println!("Starting development environment...");
 
-    let mut args = vec![
-        "compose",
-        "-f",
-        "docker-compose.dev.yml",
-    ];
+    let mut args = vec!["compose", "-f", "docker-compose.dev.yml"];
 
     if test {
         args.extend(["--profile", "test"]);
@@ -138,10 +134,7 @@ fn cmd_dev(build: bool, test: bool) -> Result<()> {
 
 fn cmd_shell() -> Result<()> {
     println!("Opening shell in dev container...");
-    run_command_interactive(
-        "docker",
-        &["exec", "-it", "harborshield-dev", "bash"],
-    )?;
+    run_command_interactive("docker", &["exec", "-it", "harborshield-dev", "bash"])?;
     Ok(())
 }
 
@@ -252,11 +245,20 @@ fn cmd_restart() -> Result<()> {
     println!("==> Rebuilding and starting...");
     run_command(
         "docker",
-        &["compose", "-f", "docker-compose.dev.yml", "up", "--build", "-d"],
+        &[
+            "compose",
+            "-f",
+            "docker-compose.dev.yml",
+            "up",
+            "--build",
+            "-d",
+        ],
     )?;
 
     println!("\nDev container restarted!");
-    println!("Reconnect in Zed: Cmd+Shift+P -> 'Connect to Remote Server via SSH' -> harborshield-dev");
+    println!(
+        "Reconnect in Zed: Cmd+Shift+P -> 'Connect to Remote Server via SSH' -> harborshield-dev"
+    );
     Ok(())
 }
 
@@ -269,10 +271,7 @@ fn cmd_clean(volumes: bool) -> Result<()> {
     run_command("docker", &args)?;
 
     // Also clean up any orphaned harborshield containers
-    let _ = run_command_silent(
-        "docker",
-        &["rm", "-f", "harborshield-dev", "test-nginx"],
-    );
+    let _ = run_command_silent("docker", &["rm", "-f", "harborshield-dev", "test-nginx"]);
 
     println!("Cleanup complete.");
     Ok(())
@@ -314,9 +313,10 @@ Host harborshield-dev
     // Check if entry already exists
     let entry_exists = if let Ok(file) = fs::File::open(&ssh_config_path) {
         let reader = BufReader::new(file);
-        reader
-            .lines()
-            .any(|line| line.map(|l| l.contains("Host harborshield-dev")).unwrap_or(false))
+        reader.lines().any(|line| {
+            line.map(|l| l.contains("Host harborshield-dev"))
+                .unwrap_or(false)
+        })
     } else {
         false
     };

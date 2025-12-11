@@ -388,3 +388,146 @@ impl ToNftablesRule for RuleConfig {
         Ok(statements)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rule_config_valid_minimal() {
+        let yaml = r#"
+proto: tcp
+dst_ports:
+  - 80
+ips:
+  - 192.168.1.1
+"#;
+        let result: std::result::Result<RuleConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_rule_config_empty_rule() {
+        let yaml = "proto: tcp";
+        let result: std::result::Result<RuleConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rule_config_ips_and_container_exclusive() {
+        let yaml = r#"
+proto: tcp
+dst_ports:
+  - 80
+ips:
+  - 192.168.1.1
+container: my-container
+network: default
+"#;
+        let result: std::result::Result<RuleConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn test_rule_config_container_requires_network() {
+        let yaml = r#"
+proto: tcp
+dst_ports:
+  - 80
+container: my-container
+"#;
+        let result: std::result::Result<RuleConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rule_config_src_ports_requires_dst_ports() {
+        let yaml = r#"
+proto: tcp
+src_ports:
+  - 8080
+ips:
+  - 192.168.1.1
+"#;
+        let result: std::result::Result<RuleConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rule_config_port_zero_invalid() {
+        let yaml = r#"
+proto: tcp
+dst_ports:
+  - 0
+ips:
+  - 192.168.1.1
+"#;
+        let result: std::result::Result<RuleConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rule_config_port_range_invalid() {
+        let yaml = r#"
+proto: tcp
+dst_ports:
+  - 8090-8080
+ips:
+  - 192.168.1.1
+"#;
+        let result: std::result::Result<RuleConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rule_config_log_prefix_too_long() {
+        let long_prefix = "a".repeat(65);
+        let yaml = format!(r#"
+proto: tcp
+dst_ports:
+  - 80
+ips:
+  - 192.168.1.1
+log_prefix: '{}'
+"#, long_prefix);
+        let result: std::result::Result<RuleConfig, _> = serde_yaml::from_str(&yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rule_config_valid_with_container() {
+        let yaml = r#"
+proto: tcp
+dst_ports:
+  - 80
+container: my-container
+network: default
+"#;
+        let result: std::result::Result<RuleConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_rule_to_nftables_tcp() {
+        let rule = RuleConfig::builder()
+            .proto(Protocol::Tcp)
+            .dst_ports(vec![RulePorts::Single(80)])
+            .ips(vec!["192.168.1.1".parse().unwrap()])
+            .build();
+        let statements = rule.to_nftables_statements().unwrap();
+        assert!(!statements.is_empty());
+    }
+
+    #[test]
+    fn test_rule_to_nftables_udp() {
+        let rule = RuleConfig::builder()
+            .proto(Protocol::Udp)
+            .dst_ports(vec![RulePorts::Single(53)])
+            .ips(vec!["8.8.8.8".parse().unwrap()])
+            .build();
+        let statements = rule.to_nftables_statements().unwrap();
+        assert!(!statements.is_empty());
+    }
+}

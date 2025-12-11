@@ -1,28 +1,33 @@
 # Development Dockerfile
-# Provides a full Rust development environment with all dependencies
+# Provides a full development environment with pixi and Docker-in-Docker
 
-FROM rust:1.88-slim
+FROM docker:dind
 
-# Install build and runtime dependencies
-RUN apt-get update && apt-get install -y \
-    pkg-config \
-    libssl-dev \
+# Install system dependencies
+RUN apk add --no-cache \
+    pkgconfig \
+    openssl-dev \
     ca-certificates \
     nftables \
     git \
     curl \
-    openssh-server \
-    nodejs \
-    npm \
-    && rm -rf /var/lib/apt/lists/*
+    openssh \
+    bash \
+    musl-dev \
+    gcc
 
-# Install cargo-watch for auto-rebuilding and rust-analyzer for IDE support
-RUN cargo install cargo-watch
-RUN rustup component add rust-analyzer
+# Install pixi for toolchain management
+RUN curl -fsSL https://pixi.sh/install.sh | sh
+ENV PATH="/root/.pixi/bin:${PATH}"
+
+# Install Rust and Docker CLI via pixi
+RUN pixi global install rust && \
+    pixi global install docker
 
 # Setup SSH for Zed remote development
-RUN mkdir /var/run/sshd && \
+RUN mkdir -p /var/run/sshd && \
     echo 'root:dev' | chpasswd && \
+    ssh-keygen -A && \
     sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
     sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
 
@@ -31,5 +36,27 @@ EXPOSE 22
 
 WORKDIR /app
 
-# Start SSH daemon and keep container running
-CMD ["/bin/bash", "-c", "/usr/sbin/sshd && sleep infinity"]
+# Startup script to run both dockerd and sshd
+COPY <<'EOF' /start.sh
+#!/bin/bash
+set -e
+
+# Start Docker daemon in background
+dockerd-entrypoint.sh dockerd &
+
+# Wait for Docker to be ready
+echo "Waiting for Docker daemon..."
+while ! docker info > /dev/null 2>&1; do
+    sleep 1
+done
+echo "Docker daemon ready!"
+
+# Start SSH daemon
+/usr/sbin/sshd
+
+# Keep container running
+sleep infinity
+EOF
+RUN chmod +x /start.sh
+
+CMD ["/start.sh"]

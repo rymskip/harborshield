@@ -1,6 +1,6 @@
 [workspace]
 members = ["xtask"]
-resolver = "3"
+resolver = "2"
 
 # =============================================================================
 # Development Tasks (xtask)

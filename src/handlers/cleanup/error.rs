@@ -282,3 +282,176 @@ impl CleanupError {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resource_cleanup_failed_constructor() {
+        let err = CleanupError::resource_cleanup_failed("container1", "nftables error", "chain");
+        match err {
+            CleanupError::ResourceCleanupFailed { container_id, reason, resource_type, .. } => {
+                assert_eq!(container_id, "container1");
+                assert_eq!(reason, "nftables error");
+                assert_eq!(resource_type, "chain");
+            }
+            _ => panic!("Expected ResourceCleanupFailed variant"),
+        }
+    }
+
+    #[test]
+    fn test_partial_cleanup_constructor() {
+        let err = CleanupError::partial_cleanup(
+            "container1",
+            3,
+            2,
+            vec!["rule1".to_string(), "rule2".to_string()],
+        );
+        match err {
+            CleanupError::PartialCleanup { container_id, succeeded, failed, failed_resources } => {
+                assert_eq!(container_id, "container1");
+                assert_eq!(succeeded, 3);
+                assert_eq!(failed, 2);
+                assert_eq!(failed_resources.len(), 2);
+            }
+            _ => panic!("Expected PartialCleanup variant"),
+        }
+    }
+
+    #[test]
+    fn test_orphaned_resources_found_constructor() {
+        let err = CleanupError::orphaned_resources_found(
+            5,
+            "chain",
+            vec!["chain1".to_string(), "chain2".to_string()],
+        );
+        match err {
+            CleanupError::OrphanedResourcesFound { count, resource_type, resource_ids, .. } => {
+                assert_eq!(count, 5);
+                assert_eq!(resource_type, "chain");
+                assert_eq!(resource_ids.len(), 2);
+            }
+            _ => panic!("Expected OrphanedResourcesFound variant"),
+        }
+    }
+
+    #[test]
+    fn test_rule_cleanup_failed_constructor() {
+        let err = CleanupError::rule_cleanup_failed("container1", "permission denied", 3, 1);
+        match err {
+            CleanupError::RuleCleanupFailed { container_id, reason, rules_removed, rules_failed } => {
+                assert_eq!(container_id, "container1");
+                assert_eq!(reason, "permission denied");
+                assert_eq!(rules_removed, 3);
+                assert_eq!(rules_failed, 1);
+            }
+            _ => panic!("Expected RuleCleanupFailed variant"),
+        }
+    }
+
+    #[test]
+    fn test_database_cleanup_failed_constructor() {
+        let err = CleanupError::database_cleanup_failed("connection error", "containers");
+        match err {
+            CleanupError::DatabaseCleanupFailed { reason, table, .. } => {
+                assert_eq!(reason, "connection error");
+                assert_eq!(table, "containers");
+            }
+            _ => panic!("Expected DatabaseCleanupFailed variant"),
+        }
+    }
+
+    #[test]
+    fn test_tracking_error_constructor() {
+        let err = CleanupError::tracking_error("lost track", "cleanup");
+        match err {
+            CleanupError::TrackingError { reason, operation, .. } => {
+                assert_eq!(reason, "lost track");
+                assert_eq!(operation, "cleanup");
+            }
+            _ => panic!("Expected TrackingError variant"),
+        }
+    }
+
+    #[test]
+    fn test_is_retryable() {
+        let timeout_err = CleanupError::CleanupTimeout {
+            container_id: "test".to_string(),
+            duration: Duration::from_secs(30),
+            pending_operations: vec!["op1".to_string()],
+        };
+        assert!(timeout_err.is_retryable());
+
+        let lock_err = CleanupError::LockAcquisitionFailed {
+            duration: Duration::from_secs(5),
+            lock_holder: Some("other".to_string()),
+        };
+        assert!(lock_err.is_retryable());
+
+        let db_err = CleanupError::database_cleanup_failed("error", "table");
+        assert!(!db_err.is_retryable());
+    }
+
+    #[test]
+    fn test_is_partial_success() {
+        let partial_with_success = CleanupError::PartialCleanup {
+            container_id: "test".to_string(),
+            succeeded: 3,
+            failed: 1,
+            failed_resources: vec!["res1".to_string()],
+        };
+        assert!(partial_with_success.is_partial_success());
+
+        let partial_no_success = CleanupError::PartialCleanup {
+            container_id: "test".to_string(),
+            succeeded: 0,
+            failed: 3,
+            failed_resources: vec!["res1".to_string()],
+        };
+        assert!(!partial_no_success.is_partial_success());
+    }
+
+    #[test]
+    fn test_recovery_action() {
+        let partial_err = CleanupError::partial_cleanup("test", 1, 1, vec!["res1".to_string()]);
+        assert!(partial_err.recovery_action().is_some());
+
+        let orphan_err = CleanupError::orphaned_resources_found(1, "chain", vec!["c1".to_string()]);
+        assert!(orphan_err.recovery_action().is_some());
+
+        let state_err = CleanupError::StateInconsistency {
+            description: "test".to_string(),
+            expected_state: "clean".to_string(),
+            actual_state: "dirty".to_string(),
+        };
+        assert!(state_err.recovery_action().is_some());
+
+        let db_err = CleanupError::database_cleanup_failed("error", "table");
+        assert!(db_err.recovery_action().is_none());
+    }
+
+    #[test]
+    fn test_requires_manual_intervention() {
+        let state_err = CleanupError::StateInconsistency {
+            description: "test".to_string(),
+            expected_state: "clean".to_string(),
+            actual_state: "dirty".to_string(),
+        };
+        assert!(state_err.requires_manual_intervention());
+
+        let rollback_err = CleanupError::RollbackFailed {
+            reason: "test".to_string(),
+            partial_rollback: true,
+            affected_resources: vec!["res1".to_string()],
+        };
+        assert!(rollback_err.requires_manual_intervention());
+
+        let timeout_err = CleanupError::CleanupTimeout {
+            container_id: "test".to_string(),
+            duration: Duration::from_secs(30),
+            pending_operations: vec![],
+        };
+        assert!(!timeout_err.requires_manual_intervention());
+    }
+}

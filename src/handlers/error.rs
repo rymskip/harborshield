@@ -272,3 +272,128 @@ impl HandlersError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_initialization_failed_constructor() {
+        let err = HandlersError::initialization_failed("test reason", "test component");
+        assert!(matches!(err, HandlersError::InitializationFailed { .. }));
+    }
+
+    #[test]
+    fn test_rule_application_failed_constructor() {
+        let err = HandlersError::rule_application_failed("container1", "nftables error", "input");
+        match err {
+            HandlersError::RuleApplicationFailed { container_id, reason, rule_type, .. } => {
+                assert_eq!(container_id, "container1");
+                assert_eq!(reason, "nftables error");
+                assert_eq!(rule_type, "input");
+            }
+            _ => panic!("Expected RuleApplicationFailed variant"),
+        }
+    }
+
+    #[test]
+    fn test_container_sync_failed_constructor() {
+        let err = HandlersError::container_sync_failed("sync failed", 5, 2);
+        match err {
+            HandlersError::ContainerSyncFailed { containers_synced, containers_failed, .. } => {
+                assert_eq!(containers_synced, 5);
+                assert_eq!(containers_failed, 2);
+            }
+            _ => panic!("Expected ContainerSyncFailed variant"),
+        }
+    }
+
+    #[test]
+    fn test_event_processing_failed_constructor() {
+        let err = HandlersError::event_processing_failed("container_start", "invalid state");
+        match err {
+            HandlersError::EventProcessingFailed { event_type, reason, .. } => {
+                assert_eq!(event_type, "container_start");
+                assert_eq!(reason, "invalid state");
+            }
+            _ => panic!("Expected EventProcessingFailed variant"),
+        }
+    }
+
+    #[test]
+    fn test_cleanup_failed_constructor() {
+        let err = HandlersError::cleanup_failed("container1", "rule removal failed");
+        match err {
+            HandlersError::CleanupFailed { container_id, reason, .. } => {
+                assert_eq!(container_id, "container1");
+                assert_eq!(reason, "rule removal failed");
+            }
+            _ => panic!("Expected CleanupFailed variant"),
+        }
+    }
+
+    #[test]
+    fn test_task_failed_constructor() {
+        let err = HandlersError::task_failed("event_listener", "connection lost");
+        match err {
+            HandlersError::TaskFailed { task_name, reason, restart_attempted, restart_count } => {
+                assert_eq!(task_name, "event_listener");
+                assert_eq!(reason, "connection lost");
+                assert!(!restart_attempted);
+                assert_eq!(restart_count, 0);
+            }
+            _ => panic!("Expected TaskFailed variant"),
+        }
+    }
+
+    #[test]
+    fn test_is_retryable() {
+        let event_stream_err = HandlersError::EventStreamLost {
+            reason: "test".to_string(),
+            duration_since_last_event: Duration::from_secs(60),
+            reconnect_attempts: 3,
+        };
+        assert!(event_stream_err.is_retryable());
+
+        let init_err = HandlersError::initialization_failed("test", "test");
+        assert!(!init_err.is_retryable());
+    }
+
+    #[test]
+    fn test_is_critical() {
+        let state_err = HandlersError::StateInconsistency {
+            description: "test".to_string(),
+            expected_state: "running".to_string(),
+            actual_state: "stopped".to_string(),
+            affected_containers: vec!["container1".to_string()],
+        };
+        assert!(state_err.is_critical());
+
+        let init_err = HandlersError::initialization_failed("test", "test");
+        assert!(init_err.is_critical());
+
+        let cleanup_err = HandlersError::cleanup_failed("test", "test");
+        assert!(!cleanup_err.is_critical());
+    }
+
+    #[test]
+    fn test_suggested_action() {
+        let event_stream_err = HandlersError::EventStreamLost {
+            reason: "test".to_string(),
+            duration_since_last_event: Duration::from_secs(60),
+            reconnect_attempts: 3,
+        };
+        assert!(event_stream_err.suggested_action().is_some());
+
+        let state_err = HandlersError::StateInconsistency {
+            description: "test".to_string(),
+            expected_state: "running".to_string(),
+            actual_state: "stopped".to_string(),
+            affected_containers: vec![],
+        };
+        assert!(state_err.suggested_action().is_some());
+
+        let task_err = HandlersError::task_failed("test", "test");
+        assert!(task_err.suggested_action().is_none());
+    }
+}

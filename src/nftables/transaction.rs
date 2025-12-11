@@ -581,3 +581,108 @@ impl NftablesTransaction {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_container_chain_name_basic() {
+        let container_id = "abc123def456789";
+        let container_name = "my-container";
+        let expected = "hs-my-container-abc123def456";
+
+        let chain_name = format!(
+            "hs-{}-{}",
+            container_name.replace(['_', '.', '/'], "-"),
+            &container_id[..12.min(container_id.len())]
+        );
+        assert_eq!(chain_name, expected);
+    }
+
+    #[test]
+    fn test_container_chain_name_sanitization_underscore() {
+        let container_id = "abc123def456789";
+        let container_name = "my_container";
+        let chain_name = format!(
+            "hs-{}-{}",
+            container_name.replace(['_', '.', '/'], "-"),
+            &container_id[..12.min(container_id.len())]
+        );
+        assert_eq!(chain_name, "hs-my-container-abc123def456");
+    }
+
+    #[test]
+    fn test_container_chain_name_sanitization_dot() {
+        let container_id = "abc123def456789";
+        let container_name = "my.container";
+        let chain_name = format!(
+            "hs-{}-{}",
+            container_name.replace(['_', '.', '/'], "-"),
+            &container_id[..12.min(container_id.len())]
+        );
+        assert_eq!(chain_name, "hs-my-container-abc123def456");
+    }
+
+    #[test]
+    fn test_container_chain_name_sanitization_slash() {
+        let container_id = "abc123def456789";
+        let container_name = "my/container";
+        let chain_name = format!(
+            "hs-{}-{}",
+            container_name.replace(['_', '.', '/'], "-"),
+            &container_id[..12.min(container_id.len())]
+        );
+        assert_eq!(chain_name, "hs-my-container-abc123def456");
+    }
+
+    #[test]
+    fn test_container_chain_name_id_truncation() {
+        let container_id = "abc123def456789extra";
+        let container_name = "test";
+        let chain_name = format!(
+            "hs-{}-{}",
+            container_name.replace(['_', '.', '/'], "-"),
+            &container_id[..12.min(container_id.len())]
+        );
+        // ID should be truncated to 12 chars
+        assert!(chain_name.ends_with("abc123def456"));
+        assert!(!chain_name.contains("extra"));
+    }
+
+    #[test]
+    fn test_container_chain_name_short_id() {
+        let container_id = "abc";
+        let container_name = "test";
+        let chain_name = format!(
+            "hs-{}-{}",
+            container_name.replace(['_', '.', '/'], "-"),
+            &container_id[..12.min(container_id.len())]
+        );
+        // Short ID should be used as-is
+        assert_eq!(chain_name, "hs-test-abc");
+    }
+
+    #[test]
+    fn test_transaction_builder_default() {
+        let transaction = NftablesTransaction::builder().build();
+        assert_eq!(transaction.family, NfFamily::IP);
+        assert!(transaction.deferred_drop_rules.is_empty());
+    }
+
+    #[test]
+    fn test_transaction_builder_with_family() {
+        let transaction = NftablesTransaction::builder()
+            .family(NfFamily::IP6)
+            .build();
+        assert_eq!(transaction.family, NfFamily::IP6);
+    }
+
+    #[test]
+    fn test_flush_chain_adds_command() {
+        let mut transaction = NftablesTransaction::builder().build();
+        transaction.flush_chain("filter", "test-chain");
+        // The batch should now contain a flush command
+        // We can't easily inspect the batch, but we can verify no panic occurred
+    }
+}

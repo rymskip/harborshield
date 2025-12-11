@@ -286,3 +286,150 @@ impl DockerError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_container_operation_failed_constructor() {
+        let err = DockerError::container_operation_failed("container1", "start", "resource busy");
+        match err {
+            DockerError::ContainerOperationFailed { container_id, operation, reason, source } => {
+                assert_eq!(container_id, "container1");
+                assert_eq!(operation, "start");
+                assert_eq!(reason, "resource busy");
+                assert!(source.is_none());
+            }
+            _ => panic!("Expected ContainerOperationFailed variant"),
+        }
+    }
+
+    #[test]
+    fn test_container_not_found_constructor() {
+        let err = DockerError::container_not_found("container1");
+        match err {
+            DockerError::ContainerNotFound { container_id } => {
+                assert_eq!(container_id, "container1");
+            }
+            _ => panic!("Expected ContainerNotFound variant"),
+        }
+    }
+
+    #[test]
+    fn test_network_not_found_constructor() {
+        let err = DockerError::network_not_found("network1");
+        match err {
+            DockerError::NetworkNotFound { network_id } => {
+                assert_eq!(network_id, "network1");
+            }
+            _ => panic!("Expected NetworkNotFound variant"),
+        }
+    }
+
+    #[test]
+    fn test_image_not_found_constructor() {
+        let err = DockerError::image_not_found("nginx:latest");
+        match err {
+            DockerError::ImageNotFound { image } => {
+                assert_eq!(image, "nginx:latest");
+            }
+            _ => panic!("Expected ImageNotFound variant"),
+        }
+    }
+
+    #[test]
+    fn test_operation_timeout_constructor() {
+        let err = DockerError::operation_timeout("container_start", Duration::from_secs(30));
+        match err {
+            DockerError::OperationTimeout { operation, duration } => {
+                assert_eq!(operation, "container_start");
+                assert_eq!(duration, Duration::from_secs(30));
+            }
+            _ => panic!("Expected OperationTimeout variant"),
+        }
+    }
+
+    #[test]
+    fn test_invalid_label_constructor() {
+        let err = DockerError::invalid_label("container1", "harborshield.rules", "invalid YAML");
+        match err {
+            DockerError::InvalidLabel { container_id, label, reason } => {
+                assert_eq!(container_id, "container1");
+                assert_eq!(label, "harborshield.rules");
+                assert_eq!(reason, "invalid YAML");
+            }
+            _ => panic!("Expected InvalidLabel variant"),
+        }
+    }
+
+    #[test]
+    fn test_is_retryable() {
+        let daemon_err = DockerError::DaemonNotResponding {
+            duration: Duration::from_secs(30),
+        };
+        assert!(daemon_err.is_retryable());
+
+        let event_err = DockerError::EventStreamDisconnected {
+            duration: Duration::from_secs(60),
+            reconnect_attempts: 3,
+        };
+        assert!(event_err.is_retryable());
+
+        let timeout_err = DockerError::operation_timeout("test", Duration::from_secs(10));
+        assert!(timeout_err.is_retryable());
+
+        let not_found_err = DockerError::container_not_found("test");
+        assert!(!not_found_err.is_retryable());
+    }
+
+    #[test]
+    fn test_retry_delay() {
+        let daemon_err = DockerError::DaemonNotResponding {
+            duration: Duration::from_secs(30),
+        };
+        assert_eq!(daemon_err.retry_delay(), Some(Duration::from_secs(2)));
+
+        let timeout_err = DockerError::operation_timeout("test", Duration::from_secs(10));
+        assert_eq!(timeout_err.retry_delay(), Some(Duration::from_secs(1)));
+
+        let network_err = DockerError::NetworkConnectionFailed {
+            container_id: "test".to_string(),
+            network_id: "net".to_string(),
+            reason: "test".to_string(),
+        };
+        assert_eq!(network_err.retry_delay(), Some(Duration::from_millis(500)));
+
+        let not_found_err = DockerError::container_not_found("test");
+        assert!(not_found_err.retry_delay().is_none());
+    }
+
+    #[test]
+    fn test_retry_delay_exponential_backoff() {
+        // Test exponential backoff for event stream errors
+        let event_err_0 = DockerError::EventStreamDisconnected {
+            duration: Duration::from_secs(60),
+            reconnect_attempts: 0,
+        };
+        assert_eq!(event_err_0.retry_delay(), Some(Duration::from_secs(1)));
+
+        let event_err_1 = DockerError::EventStreamDisconnected {
+            duration: Duration::from_secs(60),
+            reconnect_attempts: 1,
+        };
+        assert_eq!(event_err_1.retry_delay(), Some(Duration::from_secs(2)));
+
+        let event_err_3 = DockerError::EventStreamDisconnected {
+            duration: Duration::from_secs(60),
+            reconnect_attempts: 3,
+        };
+        assert_eq!(event_err_3.retry_delay(), Some(Duration::from_secs(8)));
+
+        // Should cap at 60 seconds
+        let event_err_10 = DockerError::EventStreamDisconnected {
+            duration: Duration::from_secs(60),
+            reconnect_attempts: 10,
+        };
+        assert_eq!(event_err_10.retry_delay(), Some(Duration::from_secs(60)));
+    }
+}

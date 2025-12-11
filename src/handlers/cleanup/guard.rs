@@ -118,3 +118,44 @@ macro_rules! with_cleanup {
         }
     }};
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cleanup_guard_token_not_cancelled_initially() {
+        // We can't easily test CleanupGuard without a real CleanupTracker,
+        // but we can test the CancellationToken behavior
+        let token = CancellationToken::new();
+        assert!(!token.is_cancelled());
+    }
+
+    #[test]
+    fn test_cancellation_token_cancel() {
+        let token = CancellationToken::new();
+        token.cancel();
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn test_cancellation_token_child() {
+        let parent = CancellationToken::new();
+        let child = parent.child_token();
+
+        assert!(!child.is_cancelled());
+        parent.cancel();
+        assert!(child.is_cancelled());
+    }
+
+    #[test]
+    fn test_cancellation_token_child_independent_cancel() {
+        let parent = CancellationToken::new();
+        let child = parent.child_token();
+
+        // Canceling child doesn't cancel parent
+        child.cancel();
+        assert!(child.is_cancelled());
+        assert!(!parent.is_cancelled());
+    }
+}

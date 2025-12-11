@@ -262,3 +262,104 @@ pub mod error {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::error::ValidationError;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn test_invalid_config_constructor() {
+        let err = ValidationError::invalid_config(10, "test message");
+        assert!(matches!(err, ValidationError::InvalidConfig { line: 10, .. }));
+    }
+
+    #[test]
+    fn test_invalid_config_with_suggestion() {
+        let err = ValidationError::invalid_config_with_suggestion(
+            5,
+            "bad config",
+            "port",
+            "use a valid port number",
+        );
+        match err {
+            ValidationError::InvalidConfig { line, field, suggestion, .. } => {
+                assert_eq!(line, 5);
+                assert_eq!(field, Some("port".to_string()));
+                assert_eq!(suggestion, Some("use a valid port number".to_string()));
+            }
+            _ => panic!("Expected InvalidConfig variant"),
+        }
+    }
+
+    #[test]
+    fn test_invalid_rule_constructor() {
+        let err = ValidationError::invalid_rule("missing port", "output", "proto: tcp");
+        assert!(matches!(err, ValidationError::InvalidRule { .. }));
+    }
+
+    #[test]
+    fn test_invalid_ip_address_constructor() {
+        let err = ValidationError::invalid_ip_address("not.an.ip", "parse error");
+        match err {
+            ValidationError::InvalidIpAddress { input, reason, .. } => {
+                assert_eq!(input, "not.an.ip");
+                assert_eq!(reason, "parse error");
+            }
+            _ => panic!("Expected InvalidIpAddress variant"),
+        }
+    }
+
+    #[test]
+    fn test_security_violation_constructor() {
+        let err = ValidationError::security_violation("firewall", "blocked IP", "high");
+        assert!(matches!(err, ValidationError::SecurityPolicyViolation { .. }));
+    }
+
+    #[test]
+    fn test_multiple_errors_constructor() {
+        let errors = vec!["error 1".to_string(), "error 2".to_string()];
+        let err = ValidationError::multiple_errors(errors);
+        match err {
+            ValidationError::Multiple { count, first_error, .. } => {
+                assert_eq!(count, 2);
+                assert_eq!(first_error, "error 1");
+            }
+            _ => panic!("Expected Multiple variant"),
+        }
+    }
+
+    #[test]
+    fn test_is_security_related() {
+        let security_err = ValidationError::security_violation("policy", "violation", "high");
+        assert!(security_err.is_security_related());
+
+        let blocked_ip = ValidationError::BlockedIpAddress {
+            ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            range: "10.0.0.0/8".to_string(),
+        };
+        assert!(blocked_ip.is_security_related());
+
+        let non_security_err = ValidationError::invalid_config(1, "test");
+        assert!(!non_security_err.is_security_related());
+    }
+
+    #[test]
+    fn test_severity() {
+        let high_severity = ValidationError::PrivilegedOperationDenied {
+            operation: "test".to_string(),
+            required_capability: None,
+        };
+        assert_eq!(high_severity.severity(), "high");
+
+        let medium_severity = ValidationError::RuleLimitExceeded {
+            current: 100,
+            limit: 50,
+            context: "test".to_string(),
+        };
+        assert_eq!(medium_severity.severity(), "medium");
+
+        let low_severity = ValidationError::invalid_config(1, "test");
+        assert_eq!(low_severity.severity(), "low");
+    }
+}

@@ -180,3 +180,71 @@ impl ToNftablesRule for ExternalRules {
         Ok(statements)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_external_rules_default() {
+        let rules: ExternalRules = serde_yaml::from_str("{}").unwrap();
+        assert!(!rules.allow);
+        assert!(rules.log_prefix.is_empty());
+        assert!(rules.ips.is_empty());
+    }
+
+    #[test]
+    fn test_external_rules_allow_true() {
+        let rules: ExternalRules = serde_yaml::from_str("allow: true").unwrap();
+        assert!(rules.allow);
+    }
+
+    #[test]
+    fn test_external_rules_log_prefix_valid() {
+        let rules: ExternalRules = serde_yaml::from_str("allow: true\nlog_prefix: 'test-prefix'").unwrap();
+        assert_eq!(rules.log_prefix, "test-prefix");
+    }
+
+    #[test]
+    fn test_external_rules_log_prefix_too_long() {
+        let long_prefix = "a".repeat(65);
+        let yaml = format!("allow: true\nlog_prefix: '{}'", long_prefix);
+        let result: std::result::Result<ExternalRules, _> = serde_yaml::from_str(&yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_external_rules_with_single_ip() {
+        let rules: ExternalRules = serde_yaml::from_str("allow: true\nips:\n  - 192.168.1.1").unwrap();
+        assert_eq!(rules.ips.len(), 1);
+    }
+
+    #[test]
+    fn test_external_rules_with_multiple_ips() {
+        let rules: ExternalRules = serde_yaml::from_str("allow: true\nips:\n  - 192.168.1.1\n  - 10.0.0.1").unwrap();
+        assert_eq!(rules.ips.len(), 2);
+    }
+
+    #[test]
+    fn test_external_rules_with_cidr() {
+        let rules: ExternalRules = serde_yaml::from_str("allow: true\nips:\n  - 192.168.0.0/24").unwrap();
+        assert_eq!(rules.ips.len(), 1);
+        assert!(matches!(rules.ips[0], super::super::AddrOrRange::Net(_)));
+    }
+
+    #[test]
+    fn test_external_to_nftables_statements_allow() {
+        let rules = ExternalRules::builder().allow(true).build();
+        let statements = rules.to_nftables_statements().unwrap();
+        // Should have counter and accept verdict
+        assert!(statements.len() >= 2);
+    }
+
+    #[test]
+    fn test_external_to_nftables_statements_deny() {
+        let rules = ExternalRules::builder().allow(false).build();
+        let statements = rules.to_nftables_statements().unwrap();
+        // Last statement should be Drop
+        assert!(matches!(statements.last(), Some(Statement::Drop(_))));
+    }
+}

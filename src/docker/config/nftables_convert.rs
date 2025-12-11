@@ -176,3 +176,166 @@ pub trait ToNftablesRule {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Create a dummy struct to test the trait methods
+    struct TestRule;
+    impl ToNftablesRule for TestRule {
+        fn to_nftables_statements(&self) -> Result<Vec<Statement<'static>>> {
+            Ok(vec![])
+        }
+    }
+
+    #[test]
+    fn test_match_protocol_tcp() {
+        let stmt = TestRule::match_protocol("tcp");
+        if let Statement::Match(m) = stmt {
+            assert!(matches!(m.right, Expression::Number(6)));
+        } else {
+            panic!("Expected Match statement");
+        }
+    }
+
+    #[test]
+    fn test_match_protocol_udp() {
+        let stmt = TestRule::match_protocol("udp");
+        if let Statement::Match(m) = stmt {
+            assert!(matches!(m.right, Expression::Number(17)));
+        } else {
+            panic!("Expected Match statement");
+        }
+    }
+
+    #[test]
+    fn test_match_protocol_icmp() {
+        let stmt = TestRule::match_protocol("icmp");
+        if let Statement::Match(m) = stmt {
+            assert!(matches!(m.right, Expression::Number(1)));
+        } else {
+            panic!("Expected Match statement");
+        }
+    }
+
+    #[test]
+    fn test_match_protocol_icmpv6() {
+        let stmt = TestRule::match_protocol("icmpv6");
+        if let Statement::Match(m) = stmt {
+            assert!(matches!(m.right, Expression::Number(58)));
+        } else {
+            panic!("Expected Match statement");
+        }
+    }
+
+    #[test]
+    fn test_match_protocol_unknown_defaults_to_tcp() {
+        let stmt = TestRule::match_protocol("unknown");
+        if let Statement::Match(m) = stmt {
+            assert!(matches!(m.right, Expression::Number(6)));
+        } else {
+            panic!("Expected Match statement");
+        }
+    }
+
+    #[test]
+    fn test_match_dst_port() {
+        let stmt = TestRule::match_dst_port("tcp", 80);
+        assert!(matches!(stmt, Statement::Match(_)));
+    }
+
+    #[test]
+    fn test_match_dst_port_range() {
+        let stmt = TestRule::match_dst_port_range("tcp", 80, 90);
+        if let Statement::Match(m) = stmt {
+            assert!(matches!(m.right, Expression::Range(_)));
+        } else {
+            panic!("Expected Match statement with Range");
+        }
+    }
+
+    #[test]
+    fn test_match_src_port() {
+        let stmt = TestRule::match_src_port("tcp", 8080);
+        assert!(matches!(stmt, Statement::Match(_)));
+    }
+
+    #[test]
+    fn test_match_src_ip_ipv4() {
+        let stmt = TestRule::match_src_ip("192.168.1.1");
+        assert!(matches!(stmt, Statement::Match(_)));
+    }
+
+    #[test]
+    fn test_match_src_ip_ipv6() {
+        let stmt = TestRule::match_src_ip("2001:db8::1");
+        assert!(matches!(stmt, Statement::Match(_)));
+    }
+
+    #[test]
+    fn test_match_dst_ip_ipv4() {
+        let stmt = TestRule::match_dst_ip("10.0.0.1");
+        assert!(matches!(stmt, Statement::Match(_)));
+    }
+
+    #[test]
+    fn test_match_dst_ip_ipv6() {
+        let stmt = TestRule::match_dst_ip("::1");
+        assert!(matches!(stmt, Statement::Match(_)));
+    }
+
+    #[test]
+    fn test_log_statement_with_prefix() {
+        let stmt = TestRule::log_statement(Some("test-prefix"));
+        if let Statement::Log(Some(log)) = stmt {
+            assert_eq!(log.prefix, Some(Cow::Owned("test-prefix".to_string())));
+        } else {
+            panic!("Expected Log statement with prefix");
+        }
+    }
+
+    #[test]
+    fn test_log_statement_without_prefix() {
+        let stmt = TestRule::log_statement(None);
+        if let Statement::Log(Some(log)) = stmt {
+            assert!(log.prefix.is_none());
+        } else {
+            panic!("Expected Log statement");
+        }
+    }
+
+    #[test]
+    fn test_counter_statement() {
+        let stmt = TestRule::counter_statement();
+        assert!(matches!(stmt, Statement::Counter(_)));
+    }
+
+    #[test]
+    fn test_verdict_to_statement_chain() {
+        let verdict = ConfigVerdict::builder().chain("my-chain".to_string()).build();
+        let stmt = TestRule::verdict_to_statement(&verdict);
+        assert!(matches!(stmt, Statement::Jump(_)));
+    }
+
+    #[test]
+    fn test_verdict_to_statement_queue() {
+        let verdict = ConfigVerdict::builder().queue(100).build();
+        let stmt = TestRule::verdict_to_statement(&verdict);
+        assert!(matches!(stmt, Statement::Queue(_)));
+    }
+
+    #[test]
+    fn test_verdict_to_statement_drop() {
+        let verdict = ConfigVerdict::builder().drop(true).build();
+        let stmt = TestRule::verdict_to_statement(&verdict);
+        assert!(matches!(stmt, Statement::Drop(_)));
+    }
+
+    #[test]
+    fn test_verdict_to_statement_accept_default() {
+        let verdict = ConfigVerdict::default();
+        let stmt = TestRule::verdict_to_statement(&verdict);
+        assert!(matches!(stmt, Statement::Accept(_)));
+    }
+}

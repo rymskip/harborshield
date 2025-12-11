@@ -501,3 +501,62 @@ pub fn check_kernel_version() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_duration_milliseconds() {
+        let result = parse_duration("100ms");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn test_parse_duration_seconds() {
+        let result = parse_duration("30s");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_parse_duration_no_suffix() {
+        let result = parse_duration("45");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Duration::from_secs(45));
+    }
+
+    #[test]
+    fn test_parse_duration_minutes() {
+        let result = parse_duration("5m");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn test_parse_duration_invalid_number() {
+        let result = parse_duration("abc");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_duration_empty_string() {
+        let result = parse_duration("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_duration_whitespace_trimmed() {
+        let result = parse_duration("  30s  ");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_parse_duration_zero() {
+        let result = parse_duration("0s");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Duration::from_secs(0));
+    }
+}

@@ -701,3 +701,163 @@ impl Harborshield {
         stats
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::docker::container::{Container, PortMapping};
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_convert_rule_ports_single() {
+        let ports = vec![RulePorts::Single(80)];
+        let result = convert_rule_ports(&ports);
+        assert_eq!(result, vec![80]);
+    }
+
+    #[test]
+    fn test_convert_rule_ports_range() {
+        let ports = vec![RulePorts::Range(80, 83)];
+        let result = convert_rule_ports(&ports);
+        assert_eq!(result, vec![80, 81, 82, 83]);
+    }
+
+    #[test]
+    fn test_convert_rule_ports_mixed() {
+        let ports = vec![RulePorts::Single(22), RulePorts::Range(80, 82)];
+        let result = convert_rule_ports(&ports);
+        assert_eq!(result, vec![22, 80, 81, 82]);
+    }
+
+    #[test]
+    fn test_convert_rule_ports_empty() {
+        let ports: Vec<RulePorts> = vec![];
+        let result = convert_rule_ports(&ports);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_extract_mapped_ports_empty() {
+        let container = Container {
+            id: "test".to_string(),
+            name: "test".to_string(),
+            labels: HashMap::new(),
+            networks: HashMap::new(),
+            ports: vec![],
+            enabled: false,
+            paused: false,
+            config: None,
+            uses_host_network: false,
+            aliases: vec![],
+        };
+        let result = extract_mapped_ports(&container);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_mapped_ports_no_host_port() {
+        let container = Container {
+            id: "test".to_string(),
+            name: "test".to_string(),
+            labels: HashMap::new(),
+            networks: HashMap::new(),
+            ports: vec![PortMapping {
+                container_port: 80,
+                host_port: None,
+                protocol: "tcp".to_string(),
+            }],
+            enabled: false,
+            paused: false,
+            config: None,
+            uses_host_network: false,
+            aliases: vec![],
+        };
+        let result = extract_mapped_ports(&container);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_mapped_ports_tcp() {
+        let container = Container {
+            id: "test".to_string(),
+            name: "test".to_string(),
+            labels: HashMap::new(),
+            networks: HashMap::new(),
+            ports: vec![PortMapping {
+                container_port: 80,
+                host_port: Some(8080),
+                protocol: "tcp".to_string(),
+            }],
+            enabled: false,
+            paused: false,
+            config: None,
+            uses_host_network: false,
+            aliases: vec![],
+        };
+        let result = extract_mapped_ports(&container);
+        assert!(result.is_some());
+        let (external, tcp, udp) = result.unwrap();
+        assert_eq!(external, vec![8080]);
+        assert_eq!(tcp, vec![80]);
+        assert!(udp.is_empty());
+    }
+
+    #[test]
+    fn test_extract_mapped_ports_udp() {
+        let container = Container {
+            id: "test".to_string(),
+            name: "test".to_string(),
+            labels: HashMap::new(),
+            networks: HashMap::new(),
+            ports: vec![PortMapping {
+                container_port: 53,
+                host_port: Some(53),
+                protocol: "udp".to_string(),
+            }],
+            enabled: false,
+            paused: false,
+            config: None,
+            uses_host_network: false,
+            aliases: vec![],
+        };
+        let result = extract_mapped_ports(&container);
+        assert!(result.is_some());
+        let (external, tcp, udp) = result.unwrap();
+        assert_eq!(external, vec![53]);
+        assert!(tcp.is_empty());
+        assert_eq!(udp, vec![53]);
+    }
+
+    #[test]
+    fn test_extract_mapped_ports_mixed() {
+        let container = Container {
+            id: "test".to_string(),
+            name: "test".to_string(),
+            labels: HashMap::new(),
+            networks: HashMap::new(),
+            ports: vec![
+                PortMapping {
+                    container_port: 80,
+                    host_port: Some(8080),
+                    protocol: "tcp".to_string(),
+                },
+                PortMapping {
+                    container_port: 53,
+                    host_port: Some(5353),
+                    protocol: "udp".to_string(),
+                },
+            ],
+            enabled: false,
+            paused: false,
+            config: None,
+            uses_host_network: false,
+            aliases: vec![],
+        };
+        let result = extract_mapped_ports(&container);
+        assert!(result.is_some());
+        let (external, tcp, udp) = result.unwrap();
+        assert_eq!(external.len(), 2);
+        assert_eq!(tcp, vec![80]);
+        assert_eq!(udp, vec![53]);
+    }
+}
