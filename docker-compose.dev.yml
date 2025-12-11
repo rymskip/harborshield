@@ -1,0 +1,150 @@
+# =============================================================================
+# Development Configuration for macOS
+# =============================================================================
+# Builds and runs HarborShield entirely within Docker's Linux VM.
+#
+# Usage:
+#   cargo xtask dev --build    # First run (builds image)
+#   cargo xtask dev            # Subsequent runs (uses cached image)
+#   cargo xtask dev --test     # Run with test containers
+#   cargo xtask stop           # Stop when done
+#
+# Or directly:
+#   docker-compose -f docker-compose.dev.yml up --build
+#
+# =============================================================================
+# How It Works
+# =============================================================================
+#
+# ┌─────────────────────────────────────────────────────────────────┐
+# │  Your Mac                                                       │
+# │                                                                 │
+# │   cargo xtask dev --build                                       │
+# │         │                                                       │
+# │         ▼                                                       │
+# │   docker compose -f docker-compose.dev.yml up --build           │
+# │         │                                                       │
+# └─────────┼───────────────────────────────────────────────────────┘
+#           │
+#           ▼
+# ┌─────────────────────────────────────────────────────────────────┐
+# │  Docker Desktop's Linux VM                                      │
+# │                                                                 │
+# │   ┌─────────────────────────────────────────────────────────┐   │
+# │   │  Build Stage (rust:1.88-slim)                           │   │
+# │   │                                                         │   │
+# │   │   1. Copy Cargo.toml, Cargo.lock, src/                  │   │
+# │   │   2. cargo build --release                              │   │
+# │   │   3. Output: /app/target/release/harborshield           │   │
+# │   └─────────────────────────────────────────────────────────┘   │
+# │                        │                                        │
+# │                        ▼                                        │
+# │   ┌─────────────────────────────────────────────────────────┐   │
+# │   │  Runtime Stage (debian:bookworm-slim)                   │   │
+# │   │                                                         │   │
+# │   │   - nftables installed                                  │   │
+# │   │   - harborshield binary copied in                       │   │
+# │   │   - Runs with: privileged, NET_ADMIN, network_mode:host │   │
+# │   │                                                         │   │
+# │   │   harborshield --data-dir /data --health-server :8080   │   │
+# │   └─────────────────────────────────────────────────────────┘   │
+# │                        │                                        │
+# │                        ▼                                        │
+# │   ┌─────────────────────────────────────────────────────────┐   │
+# │   │  What HarborShield Does                                 │   │
+# │   │                                                         │   │
+# │   │   1. Connects to /var/run/docker.sock                   │   │
+# │   │   2. Watches for container start/stop events            │   │
+# │   │   3. Reads harborshield.* labels from containers        │   │
+# │   │   4. Generates nftables rules based on labels           │   │
+# │   │   5. Applies rules to the VM's kernel firewall          │   │
+# │   └─────────────────────────────────────────────────────────┘   │
+# │                                                                 │
+# └─────────────────────────────────────────────────────────────────┘
+#
+# =============================================================================
+# What You Can Test
+# =============================================================================
+#   - Container label parsing
+#   - nftables rule generation
+#   - Docker event handling
+#   - Database operations
+#   - Health check endpoint
+#
+# Limitation: Since rules are applied to Docker's VM (not your Mac),
+# you won't see firewall effects on your Mac's network. But all the
+# core logic is testable.
+# =============================================================================
+
+services:
+  # ===========================================================================
+  # Development shell - use this to compile and run interactively
+  # ===========================================================================
+  # Start with: cargo xtask dev --build
+  # Then in another terminal: docker exec -it harborshield-dev bash
+  #
+  # Inside the container:
+  #   cd /app && cargo build --release
+  #   ./target/release/harborshield --data-dir /data --debug
+  # ===========================================================================
+  harborshield:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: harborshield-dev
+    restart: unless-stopped
+    privileged: true
+    # SSH available on port 2222 for Zed remote development
+    # nftables still works because we're privileged
+    ports:
+      - "2222:22"
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_ADMIN
+    volumes:
+      # Mount source code for live editing
+      - .:/app
+      # Cache cargo registry and build artifacts for faster rebuilds
+      - cargo-cache:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target-cache:/app/target
+      # Docker socket from the VM
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+      # Persistent data
+      - harborshield_data:/data
+    environment:
+      RUST_LOG: ${RUST_LOG:-debug}
+      RUST_BACKTRACE: "1"
+      DOCKER_HOST: unix:///var/run/docker.sock
+      CARGO_HOME: /usr/local/cargo
+    working_dir: /app
+    user: root
+    labels:
+      harborshield.enabled: "false"
+
+  # Optional: A test container to verify harborshield is working
+  test-nginx:
+    image: nginx:alpine
+    container_name: test-nginx
+    labels:
+      harborshield.enabled: "true"
+      harborshield.rules: |
+        output:
+          - dst: 0.0.0.0/0
+            proto: tcp
+            port: 80
+    depends_on:
+      - harborshield
+    profiles:
+      - test
+
+volumes:
+  harborshield_data:
+    driver: local
+  cargo-cache:
+    driver: local
+  cargo-git:
+    driver: local
+  target-cache:
+    driver: local

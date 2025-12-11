@@ -1,0 +1,35 @@
+# Development Dockerfile
+# Provides a full Rust development environment with all dependencies
+
+FROM rust:1.88-slim
+
+# Install build and runtime dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    ca-certificates \
+    nftables \
+    git \
+    curl \
+    openssh-server \
+    nodejs \
+    npm \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install cargo-watch for auto-rebuilding and rust-analyzer for IDE support
+RUN cargo install cargo-watch
+RUN rustup component add rust-analyzer
+
+# Setup SSH for Zed remote development
+RUN mkdir /var/run/sshd && \
+    echo 'root:dev' | chpasswd && \
+    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+
+# Expose SSH port
+EXPOSE 22
+
+WORKDIR /app
+
+# Start SSH daemon and keep container running
+CMD ["/bin/bash", "-c", "/usr/sbin/sshd && sleep infinity"]

@@ -1,3 +1,46 @@
+[workspace]
+members = ["xtask"]
+resolver = "3"
+
+# =============================================================================
+# Development Tasks (xtask)
+# =============================================================================
+# Run `cargo xtask --help` for all available commands. Quick reference:
+#
+# Development (macOS - runs in Docker's Linux VM):
+#   cargo xtask dev --build      Start dev container (first time)
+#   cargo xtask dev              Start dev container (subsequent)
+#   cargo xtask shell            Open bash shell in container
+#   cargo xtask run              Build and run harborshield
+#   cargo xtask run --watch      Auto-rebuild on file changes
+#   cargo xtask run --release    Build in release mode
+#   cargo xtask stop             Stop dev containers
+#   cargo xtask clean            Clean up Docker resources
+#   cargo xtask clean --volumes  Also remove cached volumes
+#
+# IDE Setup (Zed remote development):
+#   cargo xtask setup-zed        Add SSH config for Zed remote dev
+#   Then in Zed: Cmd+Shift+P -> "Connect to Remote Server via SSH"
+#   Enter "harborshield-dev", password "dev", open folder "/app"
+#
+# Testing:
+#   cargo xtask test             Run all tests
+#   cargo xtask test --unit      Run only unit tests
+#   cargo xtask test --ignored   Run integration tests
+#
+# Code Quality:
+#   cargo xtask check            Run fmt check, clippy, tests
+#   cargo xtask check --fix      Auto-fix formatting/clippy issues
+#
+# Building:
+#   cargo xtask build            Build release binary
+#   cargo xtask build --linux    Cross-compile for Linux
+#
+# Database:
+#   cargo xtask migrate          Run DB migrations
+#   cargo xtask sqlx-prepare     Generate SQLx offline cache
+# =============================================================================
+
 [package]
 name = "harborshield"
 version = "0.1.0"
@@ -20,7 +63,8 @@ exclude = [
     ".git*",
     "target/",
     "/config/",
-    ".sqlx/"
+    ".sqlx/",
+    "xtask/"
 ]
 
 [dependencies]
