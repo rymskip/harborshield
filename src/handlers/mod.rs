@@ -386,26 +386,23 @@ impl Harborshield {
         // remains part of the row's primary key so it still acts as a dedup key.
         let mut all_waiting_rules = Vec::new();
 
+        // Get rules for the container name
+        let mut rules = self
+            .db
+            .get_waiting_rules_for_container(container_name)
+            .await?;
+        all_waiting_rules.append(&mut rules);
+
+        // Get rules for any aliases
+        if let Some(container) = self
+            .docker_client
+            .container_tracker
+            .find_container(container_id)
         {
-            let db_lock = self.db.lock().await;
-
-            // Get rules for the container name
-            let mut rules = db_lock
-                .get_waiting_rules_for_container(container_name)
-                .await?;
-            all_waiting_rules.append(&mut rules);
-
-            // Get rules for any aliases
-            if let Some(container) = self
-                .docker_client
-                .container_tracker
-                .find_container(container_id)
-            {
-                for alias in &container.aliases {
-                    let mut alias_rules =
-                        db_lock.get_waiting_rules_for_container(alias).await?;
-                    all_waiting_rules.append(&mut alias_rules);
-                }
+            for alias in &container.aliases {
+                let mut alias_rules =
+                    self.db.get_waiting_rules_for_container(alias).await?;
+                all_waiting_rules.append(&mut alias_rules);
             }
         }
 
@@ -487,8 +484,7 @@ impl Harborshield {
                         (r.src_container_id.clone(), r.dst_container_name.clone())
                     })
                     .collect();
-                let db_lock = self.db.lock().await;
-                db_lock
+                self.db
                     .with_transaction(|tx| {
                         Box::pin(async move {
                             for (src, dst) in &pairs {
@@ -519,8 +515,7 @@ impl Harborshield {
     pub(super) async fn get_database_containers(
         &self,
     ) -> Result<HashMap<String, ContainerIdentifiers>> {
-        let db = self.db.lock().await;
-        let db_containers = db.list_containers().await?;
+        let db_containers = self.db.list_containers().await?;
         Ok(db_containers
             .into_iter()
             .map(|c| (c.id.clone(), c))

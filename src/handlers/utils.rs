@@ -547,9 +547,7 @@ impl Harborshield {
                     rule: serialized_rule,
                 };
 
-                let db_lock = self.db.lock().await;
-                db_lock.insert_waiting_rule(&waiting_rule).await?;
-                drop(db_lock);
+                self.db.insert_waiting_rule(&waiting_rule).await?;
 
                 info!(
                     "Created waiting rule: {} wants to connect to {} on port(s) {:?}",
@@ -652,9 +650,7 @@ impl Harborshield {
         transaction.remove_container_rules(container_id, container_name)?;
         transaction.commit().await?;
 
-        let db = self.db.lock().await;
-        db.delete_container(container_id).await?;
-
+        self.db.delete_container(container_id).await?;
         Ok(())
     }
 

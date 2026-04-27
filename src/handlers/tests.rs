@@ -1,20 +1,17 @@
 use crate::database::{ContainerIdentifiers, DB, WaitingContainerRule};
 use std::sync::Arc;
 use tempfile::TempDir;
-use tokio::sync::Mutex;
 
 #[tokio::test]
 async fn test_delete_waiting_rule() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test.db");
 
-    let db = Arc::new(Mutex::new(
-        DB::builder().db_path(&db_path).build().await.unwrap(),
-    ));
+    let db = Arc::new(DB::builder().db_path(&db_path).build().await.unwrap());
 
     // Insert a source container
     {
-        let db_lock = db.lock().await;
+        let db_lock = &*db;
         db_lock
             .insert_container(&ContainerIdentifiers {
                 id: "source-container".to_string(),
@@ -34,7 +31,7 @@ async fn test_delete_waiting_rule() {
     let serialized_rule = serde_json::to_vec(&rule_data).unwrap();
 
     {
-        let db_lock = db.lock().await;
+        let db_lock = &*db;
         db_lock
             .insert_waiting_rule(&WaitingContainerRule {
                 src_container_id: "source-container".to_string(),
@@ -46,7 +43,7 @@ async fn test_delete_waiting_rule() {
     }
 
     {
-        let db_lock = db.lock().await;
+        let db_lock = &*db;
         let waiting_rules = db_lock
             .get_waiting_rules_for_container("target-container")
             .await
@@ -63,7 +60,7 @@ async fn test_delete_waiting_rule() {
     }
 
     {
-        let db_lock = db.lock().await;
+        let db_lock = &*db;
         db_lock
             .delete_waiting_rule("source-container", "target-container")
             .await
@@ -146,12 +143,10 @@ async fn test_get_container_by_alias() {
 
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test.db");
-    let db = Arc::new(Mutex::new(
-        DB::builder().db_path(&db_path).build().await.unwrap(),
-    ));
+    let db = Arc::new(DB::builder().db_path(&db_path).build().await.unwrap());
 
     {
-        let db_lock = db.lock().await;
+        let db_lock = &*db;
         db_lock
             .insert_container(&ContainerIdentifiers {
                 id: "container123".to_string(),
@@ -168,7 +163,7 @@ async fn test_get_container_by_alias() {
             .unwrap();
     }
 
-    let db_lock = db.lock().await;
+    let db_lock = &*db;
     let resolved = db_lock
         .get_container_by_alias("my-alias")
         .await

@@ -8,7 +8,7 @@ use crate::database::DB;
 use crate::{Error, Result};
 use bon::{Builder, bon};
 use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -53,7 +53,7 @@ enum CleanupRequest {
 #[bon]
 impl CleanupTracker {
     #[builder]
-    pub fn new(db: Arc<Mutex<DB>>) -> Self {
+    pub fn new(db: Arc<DB>) -> Self {
         let (cleanup_tx, mut cleanup_rx) = mpsc::channel::<CleanupRequest>(100);
         let cancellation_token = CancellationToken::new();
         let token_clone = cancellation_token.clone();
@@ -262,7 +262,7 @@ fn matches_resource(a: &CleanupResource, b: &CleanupResource) -> bool {
     }
 }
 
-async fn cleanup_resource(resource: &CleanupResource, db: &Arc<Mutex<DB>>) -> Result<()> {
+async fn cleanup_resource(resource: &CleanupResource, db: &Arc<DB>) -> Result<()> {
     match resource {
         CleanupResource::NftablesRule {
             table,
@@ -447,9 +447,8 @@ async fn cleanup_resource(resource: &CleanupResource, db: &Arc<Mutex<DB>>) -> Re
         CleanupResource::DatabaseContainer { id } => {
             warn!("Cleaning up database container: id={}", id);
 
-            let db_guard = db.lock().await;
             let id_owned = id.clone();
-            match db_guard
+            match db
                 .with_transaction(|tx| {
                     Box::pin(async move {
                         crate::database::queries::delete_addrs_by_container_tx(tx, &id_owned)

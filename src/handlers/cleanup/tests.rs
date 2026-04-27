@@ -1,10 +1,10 @@
 use super::*;
 use tempfile::NamedTempFile;
 
-async fn setup_test_db() -> crate::Result<(NamedTempFile, Arc<Mutex<DB>>)> {
+async fn setup_test_db() -> crate::Result<(NamedTempFile, Arc<DB>)> {
     let temp_file = NamedTempFile::new().unwrap();
     let db = DB::builder().db_path(temp_file.path()).build().await?;
-    Ok((temp_file, Arc::new(Mutex::new(db))))
+    Ok((temp_file, Arc::new(db)))
 }
 
 #[tokio::test]
@@ -118,7 +118,7 @@ async fn test_database_cleanup() {
 
     // Insert test data
     {
-        let db_guard = db.lock().await;
+        let db_guard = &*db;
         db_guard
             .insert_container(&crate::database::models::ContainerIdentifiers {
                 id: "test123".to_string(),
@@ -155,7 +155,7 @@ async fn test_database_cleanup() {
 
     // Verify container was deleted
     {
-        let db_guard = db.lock().await;
+        let db_guard = &*db;
         assert!(
             db_guard.get_container("test123").await.unwrap().is_none(),
             "Container should have been cleaned up"

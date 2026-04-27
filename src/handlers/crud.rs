@@ -7,13 +7,12 @@ use crate::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tracing::{error, info};
 
 impl Harborshield {
     /// Remove container data from database
     pub async fn remove_container_from_database(&self, container_id: &str) -> Result<()> {
-        let db = self.db.lock().await;
+        let db = &*self.db;
         let id = container_id.to_string();
         db.with_transaction(|tx| {
             Box::pin(async move {
@@ -107,7 +106,7 @@ impl Harborshield {
             })
             .collect();
 
-        let db = self.db.lock().await;
+        let db = &*self.db;
         let id = container_id.to_string();
         let new_name = updated_details.name.clone();
         db.with_transaction(|tx| {
@@ -215,7 +214,7 @@ impl Harborshield {
             })
             .collect();
 
-        let db = self.db.lock().await;
+        let db = &*self.db;
         let id = container_id.to_string();
         db.with_transaction(|tx| {
             Box::pin(async move {
@@ -254,7 +253,7 @@ impl Harborshield {
             rule: serialized_rule,
         };
 
-        let db = self.db.lock().await;
+        let db = &*self.db;
         db.insert_waiting_rule(&waiting_rule).await?;
 
         info!(
@@ -336,7 +335,7 @@ impl Harborshield {
     /// Store container data in database
     pub(super) async fn store_container_in_database(
         container: &Container,
-        db: &Arc<Mutex<DB>>,
+        db: &Arc<DB>,
     ) -> Result<()> {
         let container_identifiers = ContainerIdentifiers::builder()
             .id(container.id.clone())
@@ -359,20 +358,18 @@ impl Harborshield {
             })
             .collect();
 
-        let db_lock = db.lock().await;
-        db_lock
-            .with_transaction(|tx| {
-                Box::pin(async move {
-                    queries::insert_container_tx(tx, &container_identifiers).await?;
-                    for addr in &addrs {
-                        queries::insert_addr_tx(tx, addr).await?;
-                    }
-                    for alias in &aliases {
-                        queries::insert_container_alias_tx(tx, alias).await?;
-                    }
-                    Ok(())
-                })
+        db.with_transaction(|tx| {
+            Box::pin(async move {
+                queries::insert_container_tx(tx, &container_identifiers).await?;
+                for addr in &addrs {
+                    queries::insert_addr_tx(tx, addr).await?;
+                }
+                for alias in &aliases {
+                    queries::insert_container_alias_tx(tx, alias).await?;
+                }
+                Ok(())
             })
-            .await
+        })
+        .await
     }
 }

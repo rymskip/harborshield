@@ -32,7 +32,7 @@ pub const RULES_LABEL: &str = "harborshield.rules";
 pub struct Harborshield {
     docker_client: Arc<DockerClient>,
     nftables_client: Arc<Mutex<NftablesClient>>,
-    db: Arc<Mutex<DB>>,
+    db: Arc<DB>,
     shutdown_tx: mpsc::Sender<()>,
     shutdown_rx: Arc<Mutex<mpsc::Receiver<()>>>,
     task_handles: Arc<StdMutex<Vec<JoinHandle<()>>>>,
@@ -56,7 +56,7 @@ impl Harborshield {
         nftables_client.init_base_chains().await?;
         let nftables_client = Arc::new(Mutex::new(nftables_client));
 
-        let db = Arc::new(Mutex::new(DB::builder().db_path(db_path).build().await?));
+        let db = Arc::new(DB::builder().db_path(db_path).build().await?);
 
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
         let shutdown_rx = Arc::new(Mutex::new(shutdown_rx));
@@ -179,14 +179,12 @@ impl Harborshield {
             error!("Failed to shutdown cleanup tracker: {}", e);
         }
 
-        // Close database connection
-        if let Ok(db_mutex) = Arc::try_unwrap(self.db) {
-            match db_mutex.into_inner() {
-                db => {
-                    if let Err(e) = db.close().await {
-                        error!("Failed to close database connection: {}", e);
-                    }
-                }
+        // Close database connection if we hold the last Arc; otherwise some
+        // tracker spawned task is still using it and the pool will close
+        // when it drops.
+        if let Some(db) = Arc::into_inner(self.db) {
+            if let Err(e) = db.close().await {
+                error!("Failed to close database connection: {}", e);
             }
         }
 
@@ -205,12 +203,10 @@ impl Harborshield {
         drop(nftables);
 
         // Clear database
-        let db = self.db.lock().await;
-        let containers = db.list_containers().await?;
+        let containers = self.db.list_containers().await?;
         for container in containers {
-            db.delete_container(&container.id).await?;
+            self.db.delete_container(&container.id).await?;
         }
-        drop(db);
 
         // Clear tracker
         self.docker_client.container_tracker.clear();
