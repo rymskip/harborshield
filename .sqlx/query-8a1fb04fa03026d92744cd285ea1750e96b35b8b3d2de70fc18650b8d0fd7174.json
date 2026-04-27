@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO waiting_container_rules (src_container_id, dst_container_name) VALUES (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "8a1fb04fa03026d92744cd285ea1750e96b35b8b3d2de70fc18650b8d0fd7174"
+}

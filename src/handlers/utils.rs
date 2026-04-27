@@ -498,60 +498,25 @@ impl Harborshield {
 
         Ok(db_container_ids)
     }
-    /// Create waiting rules for a container's references
+    /// Record (src, dst) edges for any output rule that references a container
+    /// by name. The actual rule contents aren't persisted — the destination's
+    /// rules are recomputed from the source's config when it starts.
     pub async fn create_waiting_rules_for_container(&self, container: &Container) -> Result<()> {
-        // Get the container's config
-        let config = match &container.config {
-            Some(config) => config,
-            None => {
-                // No config means no waiting rules to create
-                return Ok(());
-            }
+        let Some(config) = &container.config else {
+            return Ok(());
         };
 
-        // Process output rules to create waiting rules
         for rule_config in &config.output {
             if !rule_config.container.is_empty() {
-                let dst_ports: Vec<u16> = rule_config
-                    .dst_ports
-                    .iter()
-                    .flat_map(|p| match p {
-                        RulePorts::Single(port) => vec![*port],
-                        RulePorts::Range(start, end) => (*start..=*end).collect(),
-                    })
-                    .collect();
-
-                // Create waiting rule data
-                #[derive(Debug, serde::Serialize)]
-                struct WaitingRuleData {
-                    protocol: String,
-                    dst_ports: Vec<u16>,
-                    log_prefix: Option<String>,
-                }
-
-                let waiting_rule_data = WaitingRuleData {
-                    protocol: rule_config.proto.to_string(),
-                    dst_ports,
-                    log_prefix: if rule_config.log_prefix.is_empty() {
-                        None
-                    } else {
-                        Some(rule_config.log_prefix.clone())
-                    },
-                };
-
-                let serialized_rule = serde_json::to_vec(&waiting_rule_data)?;
-
                 let waiting_rule = crate::database::WaitingContainerRule {
                     src_container_id: container.id.clone(),
                     dst_container_name: rule_config.container.clone(),
-                    rule: serialized_rule,
                 };
-
                 self.db.insert_waiting_rule(&waiting_rule).await?;
 
                 info!(
-                    "Created waiting rule: {} wants to connect to {} on port(s) {:?}",
-                    container.name, rule_config.container, waiting_rule_data.dst_ports
+                    "Created waiting rule: {} wants to connect to {}",
+                    container.name, rule_config.container
                 );
             }
         }

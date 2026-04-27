@@ -253,7 +253,6 @@ async fn test_waiting_rules() {
     db.insert_waiting_rule(&WaitingContainerRule {
         src_container_id: "rule-test".to_string(),
         dst_container_name: "target-container".to_string(),
-        rule: vec![1, 2, 3, 4],
     })
     .await
     .unwrap();
@@ -264,7 +263,7 @@ async fn test_waiting_rules() {
         .unwrap();
     assert_eq!(rules.len(), 1);
     assert_eq!(rules[0].src_container_id, "rule-test");
-    assert_eq!(rules[0].rule, vec![1, 2, 3, 4]);
+    assert_eq!(rules[0].dst_container_name, "target-container");
 
     db.delete_waiting_rules("rule-test").await.unwrap();
     assert!(

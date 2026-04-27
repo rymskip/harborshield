@@ -232,29 +232,21 @@ impl Harborshield {
         .await
     }
 
-    /// Add a waiting rule for a container that hasn't started yet
+    /// Mark that `src_container_id` wants to talk to `dst_container_name`.
+    /// When the destination container later starts, its rules are recomputed
+    /// from the source container's config — so we don't persist the rule
+    /// payload itself, only the (src, dst) edge.
     pub async fn add_waiting_rule(
         &self,
         src_container_id: &str,
         dst_container_name: &str,
-        rule_data: serde_json::Value,
     ) -> Result<()> {
-        let serialized_rule = serde_json::to_vec(&rule_data).map_err(|e| {
-            crate::Error::invalid_state(
-                &format!("Failed to serialize rule: {}", e),
-                "serializable",
-                "serialization failed",
-            )
-        })?;
-
         let waiting_rule = WaitingContainerRule {
             src_container_id: src_container_id.to_string(),
             dst_container_name: dst_container_name.to_string(),
-            rule: serialized_rule,
         };
 
-        let db = &*self.db;
-        db.insert_waiting_rule(&waiting_rule).await?;
+        self.db.insert_waiting_rule(&waiting_rule).await?;
 
         info!(
             "Added waiting rule from {} to {} - will be applied when {} starts",

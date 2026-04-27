@@ -212,10 +212,9 @@ pub async fn insert_waiting_rule_tx(
     rule: &WaitingContainerRule,
 ) -> Result<()> {
     query!(
-        "INSERT OR IGNORE INTO waiting_container_rules (src_container_id, dst_container_name, rule) VALUES (?, ?, ?)",
+        "INSERT OR IGNORE INTO waiting_container_rules (src_container_id, dst_container_name) VALUES (?, ?)",
         rule.src_container_id,
         rule.dst_container_name,
-        rule.rule
     )
     .execute(&mut **tx)
     .await
@@ -229,7 +228,7 @@ pub async fn get_waiting_rules_for_container_tx(
 ) -> Result<Vec<WaitingContainerRule>> {
     query_as!(
         WaitingContainerRule,
-        "SELECT src_container_id, dst_container_name, rule FROM waiting_container_rules WHERE dst_container_name = ?",
+        "SELECT src_container_id, dst_container_name FROM waiting_container_rules WHERE dst_container_name = ?",
         dst_container_name
     )
     .fetch_all(&mut **tx)

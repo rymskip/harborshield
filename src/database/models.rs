@@ -56,5 +56,4 @@ pub struct EstContainer {
 pub struct WaitingContainerRule {
     pub src_container_id: String,
     pub dst_container_name: String,
-    pub rule: Vec<u8>,
 }
