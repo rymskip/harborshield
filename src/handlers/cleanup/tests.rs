@@ -8,15 +8,16 @@ async fn setup_test_db() -> crate::Result<(NamedTempFile, Arc<Mutex<DB>>)> {
 }
 
 #[tokio::test]
+#[ignore = "requires root + nftables; run with `cargo test -- --ignored`"]
 async fn test_cleanup_tracker() {
     let (_temp, db) = setup_test_db().await.unwrap();
 
     // Initialize nftables for testing
     let mut nft_client = crate::nftables::NftablesClient::builder().build();
-    if let Err(_) = nft_client.init_base_chains().await {
-        eprintln!("Skipping test - nftables not available or insufficient permissions");
-        return;
-    }
+    nft_client
+        .init_base_chains()
+        .await
+        .expect("nftables init failed: this test requires root + a working nft binary");
 
     let tracker = Arc::new(CleanupTracker::builder().db(db).build());
 
@@ -57,15 +58,16 @@ async fn test_cleanup_tracker() {
 }
 
 #[tokio::test]
+#[ignore = "requires root + nftables; run with `cargo test -- --ignored`"]
 async fn test_cleanup_guard() {
     let (_temp, db) = setup_test_db().await.unwrap();
 
     // Initialize nftables for testing
     let mut nft_client = crate::nftables::NftablesClient::builder().build();
-    if let Err(_) = nft_client.init_base_chains().await {
-        eprintln!("Skipping test - nftables not available or insufficient permissions");
-        return;
-    }
+    nft_client
+        .init_base_chains()
+        .await
+        .expect("nftables init failed: this test requires root + a working nft binary");
 
     let tracker = Arc::new(CleanupTracker::builder().db(db).build());
 
@@ -183,15 +185,16 @@ async fn test_database_cleanup() {
 }
 
 #[tokio::test]
+#[ignore = "requires root + nftables; run with `cargo test -- --ignored`"]
 async fn test_nftables_cleanup_mock() {
     let (_temp, db) = setup_test_db().await.unwrap();
 
     // Initialize nftables for testing
     let mut nft_client = crate::nftables::NftablesClient::builder().build();
-    if let Err(_) = nft_client.init_base_chains().await {
-        eprintln!("Skipping test - nftables not available or insufficient permissions");
-        return;
-    }
+    nft_client
+        .init_base_chains()
+        .await
+        .expect("nftables init failed: this test requires root + a working nft binary");
 
     let tracker = Arc::new(CleanupTracker::builder().db(db).build());
 

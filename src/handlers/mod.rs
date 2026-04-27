@@ -380,14 +380,10 @@ impl Harborshield {
             container_name,
             container_id
         );
-        // Define the waiting rule data structure once
-        #[derive(Debug, serde::Deserialize, serde::Serialize)]
-        struct WaitingRuleData {
-            protocol: String,
-            dst_ports: Vec<u16>,
-            log_prefix: Option<String>,
-        }
-        // Get waiting rules for this container (check both name and aliases)
+        // The `rule` blob stored in waiting_container_rules is currently not
+        // deserialized: when a target container starts we recompute the source
+        // container's rules from scratch via create_container_rules(). The blob
+        // remains part of the row's primary key so it still acts as a dedup key.
         let mut all_waiting_rules = Vec::new();
 
         {

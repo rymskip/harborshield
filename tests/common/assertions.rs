@@ -1643,4 +1643,84 @@ impl ConnectivityAssertions {
             })
         }
     }
+
+    /// Like `assert_connectivity_batch`, but verifies every listed connection
+    /// is *blocked* — a packet that should be dropped really is dropped.
+    /// `connections` is `(from_service, to_service, port)` and resolves
+    /// to_service's IP via docker inspect.
+    pub fn assert_blocked_batch(
+        connections: Vec<(String, String, u16)>,
+    ) -> impl FnOnce(
+        Arc<Mutex<crate::common::TestEnvironment>>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>>
+                + Send,
+        >,
+    > + Send {
+        move |env: Arc<Mutex<crate::common::TestEnvironment>>| {
+            Box::pin(async move {
+                let connection_info = {
+                    let env = env.lock().await;
+                    let containers = env.list_containers()?;
+
+                    let mut info = Vec::new();
+                    for (from_service, to_service, port) in connections {
+                        let source = containers
+                            .iter()
+                            .find(|c| c.name.contains(&from_service))
+                            .ok_or_else(|| format!("{} container not found", from_service))?;
+                        let target = containers
+                            .iter()
+                            .find(|c| c.name.contains(&to_service))
+                            .ok_or_else(|| format!("{} container not found", to_service))?;
+                        if let Some(target_ip) = &target.ip_address {
+                            info.push((
+                                source.name.clone(),
+                                target_ip.clone(),
+                                port,
+                                from_service,
+                                to_service,
+                            ));
+                        }
+                    }
+                    info
+                };
+
+                // For each blocked-path: a single attempt is enough. We don't
+                // retry — the rule is either in place or it isn't, and we don't
+                // want to wait 5×2s per blocked connection.
+                for (source_name, target_ip, port, from_service, to_service) in connection_info {
+                    let env_locked = env.lock().await;
+                    let result =
+                        env_locked.check_connectivity(&source_name, &target_ip, port, "tcp");
+                    drop(env_locked);
+
+                    match result {
+                        Ok(false) => {} // Blocked as expected
+                        Ok(true) => {
+                            return Err(format!(
+                                "Expected {} -> {}:{} to be BLOCKED but it succeeded",
+                                from_service, to_service, port
+                            )
+                            .into());
+                        }
+                        Err(e) => {
+                            // Timeouts and refused connections also count as blocked.
+                            let msg = e.to_string();
+                            if !(msg.contains("timeout") || msg.contains("refused")) {
+                                return Err(format!(
+                                    "Unexpected error testing {} -> {}:{} (expected blocked): {}",
+                                    from_service, to_service, port, msg
+                                )
+                                .into());
+                            }
+                        }
+                    }
+                }
+
+                Ok(())
+            })
+        }
+    }
 }

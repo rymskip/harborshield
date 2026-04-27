@@ -3,7 +3,6 @@ use crate::docker::config::{Config, RuleContext, ToNftablesRule};
 use crate::nftables::FILTER_TABLE;
 use crate::nftables::common::helpers::family_to_string;
 use bon::Builder;
-use bon::builder;
 use nftables::schema::{FlushObject, NfCmd};
 use nftables::{
     batch::Batch,
@@ -684,5 +683,162 @@ mod tests {
         transaction.flush_chain("filter", "test-chain");
         // The batch should now contain a flush command
         // We can't easily inspect the batch, but we can verify no panic occurred
+    }
+
+    use crate::docker::config::{Config, LocalRules, MappedPorts};
+    use nftables::schema::{NfCmd, NfObject};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn count_chain_adds(tx: &NftablesTransaction, expected_chain: &str) -> usize {
+        let nft = tx.batch.clone().to_nftables();
+        nft.objects
+            .iter()
+            .filter(|o| matches!(
+                o,
+                NfObject::CmdObject(NfCmd::Add(NfListObject::Chain(c))) if c.name == expected_chain
+            ))
+            .count()
+    }
+
+    fn count_rule_adds_in_chain(tx: &NftablesTransaction, chain: &str) -> usize {
+        let nft = tx.batch.clone().to_nftables();
+        nft.objects
+            .iter()
+            .filter(|o| matches!(
+                o,
+                NfObject::CmdObject(NfCmd::Add(NfListObject::Rule(r))) if r.chain == chain
+            ))
+            .count()
+    }
+
+    #[test]
+    fn chain_name_sanitizes_special_chars_and_truncates_id() {
+        // Underscores, dots, slashes in container names get replaced with `-`,
+        // and only the first 12 chars of the id are kept.
+        let mut tx = NftablesTransaction::builder().build();
+        let chain = NftablesTransaction::add_container_chain_to_transaction(
+            NfFamily::IP,
+            &mut tx,
+            "abcdef0123456789deadbeef",
+            "my_app.svc/web",
+        )
+        .unwrap();
+
+        assert_eq!(chain, "hs-my-app-svc-web-abcdef012345");
+        assert_eq!(count_chain_adds(&tx, &chain), 1);
+    }
+
+    #[test]
+    fn chain_name_for_short_id_does_not_panic() {
+        // A 4-char id should not trigger an out-of-bounds slice.
+        let mut tx = NftablesTransaction::builder().build();
+        let chain = NftablesTransaction::add_container_chain_to_transaction(
+            NfFamily::IP,
+            &mut tx,
+            "abcd",
+            "x",
+        )
+        .unwrap();
+        assert_eq!(chain, "hs-x-abcd");
+    }
+
+    #[test]
+    fn drop_rule_is_deferred_with_counter_log_drop_and_correct_chain() {
+        let mut tx = NftablesTransaction::builder().build();
+        NftablesTransaction::add_container_drop_rule_to_transaction(
+            NfFamily::IP,
+            &mut tx,
+            "deadbeefcafebabe",
+            "svc",
+        )
+        .unwrap();
+
+        // Drop rules are deferred so they end up at the bottom of the chain at commit time.
+        assert_eq!(tx.batch.clone().to_nftables().objects.len(), 0);
+        assert_eq!(tx.deferred_drop_rules.len(), 1);
+
+        let rule = &tx.deferred_drop_rules[0];
+        assert_eq!(rule.chain, "hs-svc-deadbeefcafe");
+
+        // Statement order: counter, log, drop (matches the audit-trail policy).
+        let kinds: Vec<&str> = rule
+            .expr
+            .iter()
+            .map(|s| match s {
+                Statement::Counter(_) => "counter",
+                Statement::Log(_) => "log",
+                Statement::Drop(_) => "drop",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, vec!["counter", "log", "drop"]);
+
+        // Log prefix should mention the chain so operators can grep dmesg by container.
+        if let Statement::Log(Some(log)) = &rule.expr[1] {
+            let prefix = log.prefix.as_ref().unwrap();
+            assert!(prefix.contains("hs-svc-deadbeefcafe"));
+        } else {
+            panic!("expected Log statement at index 1");
+        }
+    }
+
+    #[test]
+    fn mapped_ports_localhost_allow_emits_one_rule_per_tcp_port() {
+        let mut tx = NftablesTransaction::builder().build();
+        let cfg = Config::builder()
+            .mapped_ports(
+                MappedPorts::builder()
+                    .localhost(LocalRules::builder().allow(true).build())
+                    .build(),
+            )
+            .build();
+
+        NftablesTransaction::add_container_rules_to_transaction(
+            NfFamily::IP,
+            &mut tx,
+            "deadbeefcafebabe",
+            "svc",
+            &[IpAddr::V4(Ipv4Addr::new(172, 17, 0, 2))],
+            &[(80, "tcp".to_string()), (443, "tcp".to_string())],
+            &cfg,
+        )
+        .unwrap();
+
+        let chain = "hs-svc-deadbeefcafe";
+        assert_eq!(count_rule_adds_in_chain(&tx, chain), 2);
+    }
+
+    #[test]
+    fn mapped_ports_disabled_emits_no_rules() {
+        let mut tx = NftablesTransaction::builder().build();
+        // Default Config has mapped_ports.localhost.allow = false and external.allow = false.
+        let cfg = Config::builder().build();
+
+        NftablesTransaction::add_container_rules_to_transaction(
+            NfFamily::IP,
+            &mut tx,
+            "deadbeefcafebabe",
+            "svc",
+            &[IpAddr::V4(Ipv4Addr::new(172, 17, 0, 2))],
+            &[(80, "tcp".to_string())],
+            &cfg,
+        )
+        .unwrap();
+
+        assert_eq!(count_rule_adds_in_chain(&tx, "hs-svc-deadbeefcafe"), 0);
+    }
+
+    #[test]
+    fn flush_chain_adds_flush_command() {
+        let mut tx = NftablesTransaction::builder().build();
+        tx.flush_chain("filter", "hs-svc-abcdef012345");
+
+        let nft = tx.batch.clone().to_nftables();
+        let flush_count = nft
+            .objects
+            .iter()
+            .filter(|o| matches!(o, NfObject::CmdObject(NfCmd::Flush(_))))
+            .count();
+        assert_eq!(flush_count, 1);
     }
 }

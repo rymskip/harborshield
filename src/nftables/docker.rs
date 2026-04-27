@@ -297,3 +297,97 @@ pub async fn validate_docker_environment() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nftables::batch::Batch;
+    use nftables::schema::{NfCmd, NfObject};
+    use nftables::types::NfFamily;
+
+    fn count_inserts_into(nft: &nftables::schema::Nftables, expected_chain: &str) -> usize {
+        nft.objects
+            .iter()
+            .filter(|o| matches!(
+                o,
+                NfObject::CmdObject(NfCmd::Insert(NfListObject::Rule(r))) if r.chain == expected_chain
+            ))
+            .count()
+    }
+
+    #[test]
+    fn create_harborshield_chain_adds_filter_typed_chain() {
+        let mut batch: Batch<'static> = Batch::new();
+        create_harborshield_chain(&mut batch, NfFamily::IP);
+
+        let nft = batch.to_nftables();
+        let mut chains = nft
+            .objects
+            .iter()
+            .filter_map(|o| match o {
+                NfObject::CmdObject(NfCmd::Add(NfListObject::Chain(c))) => Some(c),
+                _ => None,
+            });
+        let chain = chains.next().expect("chain should be added");
+        assert_eq!(chain.name, HARBORSHIELD_CHAIN);
+        assert_eq!(chain.table, FILTER_TABLE);
+        // _type should be set to Filter; verify via JSON shape since the enum is non-pub.
+        let chain_json = serde_json::to_value(chain).unwrap();
+        assert_eq!(chain_json["type"], "filter");
+        assert!(chains.next().is_none(), "exactly one chain expected");
+    }
+
+    #[test]
+    fn create_jump_rules_skips_missing_chains() {
+        // Only DOCKER-USER present -> exactly one Insert into DOCKER-USER, none elsewhere.
+        let mut batch: Batch<'static> = Batch::new();
+        create_jump_rules(&mut batch, NfFamily::IP, true, false, false);
+
+        let nft = batch.to_nftables();
+        assert_eq!(count_inserts_into(&nft, DOCKER_USER_CHAIN), 1);
+        assert_eq!(count_inserts_into(&nft, INPUT_CHAIN), 0);
+        assert_eq!(count_inserts_into(&nft, OUTPUT_CHAIN), 0);
+    }
+
+    #[test]
+    fn create_jump_rules_emits_one_per_present_chain() {
+        let mut batch: Batch<'static> = Batch::new();
+        create_jump_rules(&mut batch, NfFamily::IP, true, true, true);
+
+        let nft = batch.to_nftables();
+        assert_eq!(count_inserts_into(&nft, DOCKER_USER_CHAIN), 1);
+        assert_eq!(count_inserts_into(&nft, INPUT_CHAIN), 1);
+        assert_eq!(count_inserts_into(&nft, OUTPUT_CHAIN), 1);
+    }
+
+    #[test]
+    fn create_jump_rules_targets_harborshield_chain() {
+        let mut batch: Batch<'static> = Batch::new();
+        create_jump_rules(&mut batch, NfFamily::IP, true, false, false);
+
+        let nft = batch.to_nftables();
+        let rule = nft
+            .objects
+            .iter()
+            .find_map(|o| match o {
+                NfObject::CmdObject(NfCmd::Insert(NfListObject::Rule(r))) => Some(r),
+                _ => None,
+            })
+            .expect("jump rule should be inserted");
+
+        // Statement order: counter then jump-to-harborshield.
+        assert!(matches!(rule.expr[0], Statement::Counter(_)));
+        match &rule.expr[1] {
+            Statement::Jump(target) => assert_eq!(target.target, HARBORSHIELD_CHAIN),
+            _ => panic!("expected Jump statement at index 1"),
+        }
+    }
+
+    #[test]
+    fn create_jump_rules_with_no_chains_emits_nothing() {
+        let mut batch: Batch<'static> = Batch::new();
+        create_jump_rules(&mut batch, NfFamily::IP, false, false, false);
+        let nft = batch.to_nftables();
+        assert_eq!(nft.objects.len(), 0);
+    }
+}

@@ -63,13 +63,24 @@ async fn test_get_container_by_name() {
         .await
         .unwrap();
 
-    // Note: GetContainerByName operation doesn't exist in DbOp enum
-    // We'll need to add it or use a different approach
-    // For now, let's just verify with GetContainer
-    let result = db.execute(&DbOp::GetContainer("test456")).await.unwrap();
+    let result = db
+        .execute(&DbOp::GetContainerByName("named-container"))
+        .await
+        .unwrap();
     if let DbOpResult::ContainerIdentifiers(retrieved) = result {
-        assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().id, "test456");
+        let retrieved = retrieved.expect("container should be found by name");
+        assert_eq!(retrieved.id, "test456");
+        assert_eq!(retrieved.name, "named-container");
+    } else {
+        panic!("Expected ContainerIdentifiers result");
+    }
+
+    let missing = db
+        .execute(&DbOp::GetContainerByName("does-not-exist"))
+        .await
+        .unwrap();
+    if let DbOpResult::ContainerIdentifiers(retrieved) = missing {
+        assert!(retrieved.is_none());
     } else {
         panic!("Expected ContainerIdentifiers result");
     }
@@ -180,8 +191,24 @@ async fn test_insert_and_get_addrs() {
     db.execute(&DbOp::InsertAddr(&addr1)).await.unwrap();
     db.execute(&DbOp::InsertAddr(&addr2)).await.unwrap();
 
-    // Note: GetAddrsByContainer operation doesn't exist in DbOp enum
-    // We'll need to add it or skip this test for now
+    let result = db
+        .execute(&DbOp::GetAddrsByContainer("addr-test"))
+        .await
+        .unwrap();
+    let addrs = match result {
+        DbOpResult::Addrs(a) => a,
+        _ => panic!("Expected Addrs result"),
+    };
+    assert_eq!(addrs.len(), 2);
+    let mut ips: Vec<IpAddr> = addrs.iter().map(|a| a.to_ip().unwrap()).collect();
+    ips.sort();
+    assert_eq!(
+        ips,
+        vec![
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -203,10 +230,29 @@ async fn test_delete_addrs_by_container() {
     );
     db.execute(&DbOp::InsertAddr(&addr)).await.unwrap();
 
+    let pre = db
+        .execute(&DbOp::GetAddrsByContainer("addr-del-test"))
+        .await
+        .unwrap();
+    let pre_addrs = match pre {
+        DbOpResult::Addrs(a) => a,
+        _ => panic!("Expected Addrs result"),
+    };
+    assert_eq!(pre_addrs.len(), 1);
+
     db.execute(&DbOp::DeleteAddrsByContainer("addr-del-test"))
         .await
         .unwrap();
-    // Can't verify deletion without GetAddrsByContainer operation
+
+    let post = db
+        .execute(&DbOp::GetAddrsByContainer("addr-del-test"))
+        .await
+        .unwrap();
+    let post_addrs = match post {
+        DbOpResult::Addrs(a) => a,
+        _ => panic!("Expected Addrs result"),
+    };
+    assert!(post_addrs.is_empty());
 }
 
 #[tokio::test]
@@ -230,12 +276,30 @@ async fn test_container_aliases() {
         .await
         .unwrap();
 
-    // Note: GetContainerByAlias operation doesn't exist in DbOp enum
-    // We'll need to add it or skip this test for now
+    let result = db
+        .execute(&DbOp::GetContainerByAlias("my-alias"))
+        .await
+        .unwrap();
+    if let DbOpResult::ContainerIdentifiers(retrieved) = result {
+        let retrieved = retrieved.expect("alias should resolve to container");
+        assert_eq!(retrieved.id, "alias-test");
+    } else {
+        panic!("Expected ContainerIdentifiers result");
+    }
 
     db.execute(&DbOp::DeleteContainerAliases("alias-test"))
         .await
         .unwrap();
+
+    let after = db
+        .execute(&DbOp::GetContainerByAlias("my-alias"))
+        .await
+        .unwrap();
+    if let DbOpResult::ContainerIdentifiers(retrieved) = after {
+        assert!(retrieved.is_none(), "alias should be removed after delete");
+    } else {
+        panic!("Expected ContainerIdentifiers result");
+    }
 }
 
 #[tokio::test]

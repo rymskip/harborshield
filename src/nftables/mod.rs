@@ -14,7 +14,7 @@ use crate::{
         transaction::NftablesTransaction,
     },
 };
-use bon::{Builder, builder};
+use bon::Builder;
 use common::helpers;
 use nftables::{
     batch::Batch,

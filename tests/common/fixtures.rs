@@ -737,6 +737,10 @@ services:
     image: ghcr.io/capnspacehook/eavesdropper
     labels:
       harborshield.enabled: true
+      # Client only allows tcp:756 toward server. server also listens on 80
+      # and 9001 — those should be dropped by harborshield. The framework
+      # turns this into a real packet probe (nc with timeout).
+      harborshield.test.expect_blocked: "server:80,server:9001"
       harborshield.rules: |
         mapped_ports:
           localhost:
@@ -756,7 +760,7 @@ services:
           - network: default
             container: server
             proto: tcp
-            dst_ports: 
+            dst_ports:
               - 756
           - proto: tcp
             ips:

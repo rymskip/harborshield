@@ -41,6 +41,9 @@ pub struct TestEnvironment {
     harborshield_process: Option<std::process::Child>,
     test_name: String,
     verdict_chains: Vec<String>,
+    /// `127.0.0.1:<port>` where harborshield's --health-server is bound for this test.
+    /// Used to poll readiness instead of fixed sleeps.
+    health_addr: Option<String>,
 }
 
 impl Clone for TestEnvironment {
@@ -53,8 +56,18 @@ impl Clone for TestEnvironment {
             harborshield_process: None,
             test_name: self.test_name.clone(),
             verdict_chains: self.verdict_chains.clone(),
+            health_addr: self.health_addr.clone(),
         }
     }
+}
+
+/// Block on an async future from sync test setup code, using a temporary tokio runtime.
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime for readiness probe")
+        .block_on(future)
 }
 
 #[bon]
@@ -89,6 +102,7 @@ impl TestEnvironment {
             harborshield_process: None,
             test_name: test_name.unwrap_or_else(|| "unknown_test".to_string()),
             verdict_chains: verdict_chains.unwrap_or_default(),
+            health_addr: None,
         };
 
         // If we have a compose file provided, use it; otherwise create a default network
@@ -98,8 +112,7 @@ impl TestEnvironment {
                 env.start_compose_and_harborshield()?;
             } else {
                 env.start_compose()?;
-                // Wait for services to be ready
-                thread::sleep(Duration::from_secs(5));
+                env.wait_for_compose_ready(Duration::from_secs(60))?;
             }
         } else {
             // Create a default network for individual test containers
@@ -210,19 +223,25 @@ impl TestEnvironment {
         std::fs::create_dir_all(&log_dir)?;
         let log_file_path = log_dir.join(format!("harborshield_compose_{}.log", timestamp));
 
+        // Allocate a port for harborshield's health server so we can poll readiness.
+        let health_port = crate::common::pick_free_port()?;
+        let health_addr = format!("127.0.0.1:{}", health_port);
+        self.health_addr = Some(health_addr.clone());
+
         // Create a shell command that runs compose and then harborshield, redirecting harborshield's stderr to log file
         eprintln!(
             "📝 Harborshield logs will be saved to: {}",
             log_file_path.display()
         );
         let full_command = format!(
-            "docker compose -f {} -p {} up -d --build && echo '✅ Docker Compose services started' && docker compose -f {} -p {} ps && {} --data-dir {} --debug 2>{}",
+            "docker compose -f {} -p {} up -d --build && echo '✅ Docker Compose services started' && docker compose -f {} -p {} ps && {} --data-dir {} --debug --health-server {} 2>{}",
             self.compose_file.to_str().unwrap(),
             self.project_name,
             self.compose_file.to_str().unwrap(),
             self.project_name,
             harborshield_binary.to_str().unwrap(),
             self.temp_dir.path().to_str().unwrap(),
+            health_addr,
             log_file_path.to_str().unwrap()
         );
 
@@ -249,10 +268,38 @@ impl TestEnvironment {
 
         self.harborshield_process = Some(child);
 
-        // Wait for everything to be ready
-        thread::sleep(Duration::from_secs(5));
+        // Poll readiness instead of sleeping a fixed duration.
+        self.wait_for_compose_ready(Duration::from_secs(60))?;
+        self.wait_for_harborshield_ready(Duration::from_secs(60))?;
 
         Ok(())
+    }
+
+    fn wait_for_compose_ready(
+        &self,
+        timeout: Duration,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let compose_file = self.compose_file.clone();
+        let project = self.project_name.clone();
+        block_on(async move {
+            crate::common::wait_for_compose_services(&compose_file, &project, timeout).await
+        })
+        .map_err(|e| format!("compose readiness probe failed: {}", e).into())
+    }
+
+    fn wait_for_harborshield_ready(
+        &self,
+        timeout: Duration,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let Some(addr) = self.health_addr.clone() else {
+            // No health server configured for this test variant — fall back to a brief settle.
+            thread::sleep(Duration::from_secs(1));
+            return Ok(());
+        };
+        block_on(async move {
+            crate::common::wait_for_harborshield_health(&addr, timeout).await
+        })
+        .map_err(|e| format!("harborshield readiness probe failed: {}", e).into())
     }
 
     fn start_compose(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -360,11 +407,17 @@ impl TestEnvironment {
         let log_file_path = log_dir.join(format!("harborshield_compose_{}.log", timestamp));
         let log_file = std::fs::File::create(&log_file_path)?;
 
+        let health_port = crate::common::pick_free_port()?;
+        let health_addr = format!("127.0.0.1:{}", health_port);
+        self.health_addr = Some(health_addr.clone());
+
         let child = Command::new(&harborshield_binary)
-            .args(&[
+            .args([
                 "--data-dir",
                 self.temp_dir.path().to_str().unwrap(),
                 "--debug",
+                "--health-server",
+                &health_addr,
             ])
             .env("RUST_BACKTRACE", "1")
             .env(
@@ -375,57 +428,48 @@ impl TestEnvironment {
             .stderr(log_file)
             .spawn()?;
 
-        // Give harborshield a moment to start
-        std::thread::sleep(std::time::Duration::from_millis(500));
-
         self.harborshield_process = Some(child);
 
-        // Wait for harborshield to initialize
-        thread::sleep(Duration::from_secs(3));
+        // Poll the health endpoint instead of sleeping.
+        self.wait_for_harborshield_ready(Duration::from_secs(60))?;
 
         Ok(())
     }
 
     pub fn stop_harborshield(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if let Some(mut process) = self.harborshield_process.take() {
-            // Send SIGTERM
-            #[cfg(unix)]
-            {
-                use nix::sys::signal;
-                use nix::unistd::Pid;
-                let _ = signal::kill(Pid::from_raw(process.id() as i32), signal::Signal::SIGTERM);
-            }
+        let Some(mut process) = self.harborshield_process.take() else {
+            return Ok(());
+        };
 
-            // Wait for graceful shutdown
-            thread::sleep(Duration::from_secs(2));
-
-            // Try to wait for the process
-            match process.try_wait()? {
-                Some(status) => {
-                    if !status.success() {
-                        eprintln!("Harborshield exited with status: {}", status);
-                    }
-                }
-                None => {
-                    // Still running, wait a bit more
-                    thread::sleep(Duration::from_secs(8));
-
-                    // Try again
-                    match process.try_wait()? {
-                        Some(status) => {
-                            if !status.success() {
-                                eprintln!("Harborshield exited with status: {}", status);
-                            }
-                        }
-                        None => {
-                            // Force kill if not terminated
-                            process.kill()?;
-                            process.wait()?;
-                        }
-                    }
-                }
-            }
+        #[cfg(unix)]
+        {
+            use nix::sys::signal;
+            use nix::unistd::Pid;
+            let _ = signal::kill(Pid::from_raw(process.id() as i32), signal::Signal::SIGTERM);
         }
+
+        // Poll for graceful exit up to 10s, checking every 100ms.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let exited = loop {
+            if let Some(status) = process.try_wait()? {
+                if !status.success() {
+                    eprintln!("Harborshield exited with status: {}", status);
+                }
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            thread::sleep(Duration::from_millis(100));
+        };
+
+        if !exited {
+            eprintln!("Harborshield did not exit within 10s; sending SIGKILL");
+            process.kill()?;
+            process.wait()?;
+        }
+
+        self.health_addr = None;
         Ok(())
     }
 

@@ -11,6 +11,9 @@ pub mod runner;
 pub mod generator;
 
 pub use environment::TestEnvironment;
-pub use helpers::retry_with_delay;
+pub use helpers::{
+    pick_free_port, poll_until, retry_with_delay, tcp_probe, wait_for_compose_services,
+    wait_for_harborshield_health,
+};
 pub use parser::{ComposeParser, NamedAssertion};
 pub use runner::Runner;

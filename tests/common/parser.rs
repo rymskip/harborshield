@@ -228,9 +228,20 @@ impl ComposeParser {
         // Add container rules assertions
         let mut port_rules = Vec::new();
         let mut connections = Vec::new();
+        let mut blocked_connections: Vec<(String, String, u16)> = Vec::new();
 
         eprintln!("🔍 Analyzing service rules...");
         for (service_name, service) in &services {
+            // Negative-path assertions are independent of harborshield.enabled —
+            // any service can declare what it expects to be blocked.
+            for (target, port) in Self::get_expect_blocked(service) {
+                eprintln!(
+                    "    🚫 Expect blocked: {} -> {} on port {}",
+                    service_name, target, port
+                );
+                blocked_connections.push((service_name.to_string(), target, port));
+            }
+
             if Self::has_harborshield_enabled(service) {
                 eprintln!("  📋 Checking rules for service: {}", service_name);
                 // Check for port rules
@@ -342,6 +353,20 @@ impl ComposeParser {
                 name: "Test connectivity between services".to_string(),
                 assertion: Box::new(ConnectivityAssertions::assert_connectivity_batch(
                     connections,
+                )),
+            });
+        }
+
+        // Add negative-path assertion: services that declare expect_blocked
+        if !blocked_connections.is_empty() {
+            eprintln!("➕ Adding assertion: Verify expected drops");
+            for (from, to, port) in &blocked_connections {
+                eprintln!("   - {} -> {}:{} (expected BLOCKED)", from, to, port);
+            }
+            assertions.push(NamedAssertion {
+                name: "Verify expected drops".to_string(),
+                assertion: Box::new(ConnectivityAssertions::assert_blocked_batch(
+                    blocked_connections,
                 )),
             });
         }
@@ -612,6 +637,34 @@ impl ComposeParser {
                 .map(|s| s.as_str()),
             _ => None,
         }
+    }
+
+    /// Parse `harborshield.test.expect_blocked` -> Vec<(target_service, port)>.
+    /// Format: comma-separated `service:port` items, e.g. "server:9001,server:80".
+    fn get_expect_blocked(service: &Service) -> Vec<(String, u16)> {
+        let raw = match &service.labels {
+            compose_spec::ListOrMap::Map(map) => map
+                .get("harborshield.test.expect_blocked")
+                .and_then(|v| v.as_ref())
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_string()),
+            _ => None,
+        };
+        let Some(raw) = raw else {
+            return Vec::new();
+        };
+        raw.split(',')
+            .filter_map(|item| {
+                let mut parts = item.trim().splitn(2, ':');
+                let target = parts.next()?.trim().to_string();
+                let port = parts.next()?.trim().parse::<u16>().ok()?;
+                if target.is_empty() {
+                    None
+                } else {
+                    Some((target, port))
+                }
+            })
+            .collect()
     }
 
     /// Extract container port from port mappings
