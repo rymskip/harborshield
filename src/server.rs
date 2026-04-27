@@ -1,16 +1,34 @@
+//! HTTP health/metrics server.
+//!
+//! Exposes `/health`, `/ready`, `/metrics`, `/version`, `/status` over HTTP/1.1
+//! using axum. Metrics setup and the small counter/gauge helpers below are
+//! unrelated to the HTTP layer and used from across the crate.
+
+use axum::{
+    Json, Router,
+    extract::State,
+    http::{HeaderValue, StatusCode, header::CONTENT_TYPE},
+    response::{IntoResponse, Response},
+    routing::get,
+};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use serde_json::json;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tracing::{error, info};
+use std::sync::Arc;
+use tokio::net::TcpListener;
+use tracing::info;
 
 use crate::Result;
 
-pub struct HealthServer {
-    listener: TcpListener,
+#[derive(Clone)]
+struct HealthState {
     prometheus_handle: PrometheusHandle,
     start_time: chrono::DateTime<chrono::Utc>,
     version: String,
+}
+
+pub struct HealthServer {
+    listener: TcpListener,
+    state: HealthState,
 }
 
 impl HealthServer {
@@ -20,15 +38,15 @@ impl HealthServer {
         version: String,
     ) -> Result<Self> {
         let listener = TcpListener::bind(bind_addr).await?;
-        let bind_addr = listener.local_addr()?;
-
-        info!("Health check server will bind to {}", bind_addr);
+        info!("Health check server will bind to {}", listener.local_addr()?);
 
         Ok(Self {
             listener,
-            prometheus_handle,
-            start_time: chrono::Utc::now(),
-            version,
+            state: HealthState {
+                prometheus_handle,
+                start_time: chrono::Utc::now(),
+                version,
+            },
         })
     }
 
@@ -38,26 +56,16 @@ impl HealthServer {
             self.listener.local_addr()?
         );
 
-        loop {
-            match self.listener.accept().await {
-                Ok((stream, _)) => {
-                    let prometheus_handle = self.prometheus_handle.clone();
-                    let start_time = self.start_time;
-                    let version = self.version.clone();
+        let router = Router::new()
+            .route("/health", get(health))
+            .route("/ready", get(ready))
+            .route("/metrics", get(metrics))
+            .route("/version", get(version))
+            .route("/status", get(status))
+            .with_state(Arc::new(self.state));
 
-                    tokio::spawn(async move {
-                        if let Err(e) =
-                            handle_connection(stream, prometheus_handle, start_time, version).await
-                        {
-                            error!("Error handling connection: {}", e);
-                        }
-                    });
-                }
-                Err(e) => {
-                    error!("Error accepting connection: {}", e);
-                }
-            }
-        }
+        axum::serve(self.listener, router).await?;
+        Ok(())
     }
 
     pub fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
@@ -65,112 +73,56 @@ impl HealthServer {
     }
 }
 
-async fn handle_connection(
-    mut stream: TcpStream,
-    prometheus_handle: PrometheusHandle,
-    start_time: chrono::DateTime<chrono::Utc>,
-    version: String,
-) -> Result<()> {
-    let mut buffer = [0; 1024];
-    let n = stream.read(&mut buffer).await?;
-    let request = String::from_utf8_lossy(&buffer[..n]);
-
-    // Parse the HTTP request line
-    let first_line = request.lines().next().unwrap_or("");
-    let parts: Vec<&str> = first_line.split_whitespace().collect();
-
-    if parts.len() < 2 {
-        send_response(&mut stream, 400, "Bad Request", "text/plain", "Bad Request").await?;
-        return Ok(());
-    }
-
-    let path = parts[1];
-
-    match path {
-        "/health" => {
-            let response = json!({
-                "status": "healthy",
-                "timestamp": chrono::Utc::now().to_rfc3339()
-            });
-            send_json_response(&mut stream, 200, "OK", &response).await?;
-        }
-        "/ready" => {
-            let response = json!({
-                "status": "ready",
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-                "uptime_seconds": (chrono::Utc::now() - start_time).num_seconds()
-            });
-            send_json_response(&mut stream, 200, "OK", &response).await?;
-        }
-        "/metrics" => {
-            let metrics = prometheus_handle.render();
-            send_response(&mut stream, 200, "OK", "text/plain", &metrics).await?;
-        }
-        "/version" => {
-            let response = json!({
-                "version": version,
-                "build_time": option_env!("BUILD_TIME").unwrap_or("unknown"),
-                "git_commit": option_env!("GIT_COMMIT").unwrap_or("unknown"),
-                "rust_version": option_env!("RUST_VERSION").unwrap_or("unknown")
-            });
-            send_json_response(&mut stream, 200, "OK", &response).await?;
-        }
-        "/status" => {
-            let uptime = chrono::Utc::now() - start_time;
-            let response = json!({
-                "status": "running",
-                "version": version,
-                "uptime_seconds": uptime.num_seconds(),
-                "start_time": start_time.to_rfc3339(),
-                "timestamp": chrono::Utc::now().to_rfc3339()
-            });
-            send_json_response(&mut stream, 200, "OK", &response).await?;
-        }
-        _ => {
-            send_response(&mut stream, 404, "Not Found", "text/plain", "Not Found").await?;
-        }
-    }
-
-    Ok(())
+async fn health() -> Json<serde_json::Value> {
+    Json(json!({
+        "status": "healthy",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    }))
 }
 
-async fn send_response(
-    stream: &mut TcpStream,
-    status_code: u16,
-    status_text: &str,
-    content_type: &str,
-    body: &str,
-) -> Result<()> {
-    let response = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        status_code,
-        status_text,
-        content_type,
-        body.len(),
-        body
+async fn ready(State(state): State<Arc<HealthState>>) -> Json<serde_json::Value> {
+    Json(json!({
+        "status": "ready",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "uptime_seconds": (chrono::Utc::now() - state.start_time).num_seconds(),
+    }))
+}
+
+async fn metrics(State(state): State<Arc<HealthState>>) -> Response {
+    let body = state.prometheus_handle.render();
+    let mut response = (StatusCode::OK, body).into_response();
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; version=0.0.4"),
     );
-    stream.write_all(response.as_bytes()).await?;
-    stream.flush().await?;
-    Ok(())
+    response
 }
 
-async fn send_json_response(
-    stream: &mut TcpStream,
-    status_code: u16,
-    status_text: &str,
-    json_value: &serde_json::Value,
-) -> Result<()> {
-    let body = json_value.to_string();
-    send_response(stream, status_code, status_text, "application/json", &body).await
+async fn version(State(state): State<Arc<HealthState>>) -> Json<serde_json::Value> {
+    Json(json!({
+        "version": state.version,
+        "build_time": option_env!("BUILD_TIME").unwrap_or("unknown"),
+        "git_commit": option_env!("GIT_COMMIT").unwrap_or("unknown"),
+        "rust_version": option_env!("RUST_VERSION").unwrap_or("unknown"),
+    }))
+}
+
+async fn status(State(state): State<Arc<HealthState>>) -> Json<serde_json::Value> {
+    let uptime = chrono::Utc::now() - state.start_time;
+    Json(json!({
+        "status": "running",
+        "version": state.version,
+        "uptime_seconds": uptime.num_seconds(),
+        "start_time": state.start_time.to_rfc3339(),
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    }))
 }
 
 pub fn setup_metrics() -> Result<PrometheusHandle> {
-    let builder = PrometheusBuilder::new();
-    let handle = builder
+    let handle = PrometheusBuilder::new()
         .install_recorder()
         .map_err(|e| crate::Error::metrics(format!("Failed to setup metrics: {}", e)))?;
 
-    // Register some custom metrics
     metrics::describe_counter!(
         "harborshield_rules_applied_total",
         "Total number of firewall rules applied"
@@ -199,7 +151,6 @@ pub fn setup_metrics() -> Result<PrometheusHandle> {
     Ok(handle)
 }
 
-// Metrics helper functions
 pub fn increment_rules_applied() {
     metrics::counter!("harborshield_rules_applied_total").increment(1);
 }
@@ -288,5 +239,120 @@ mod tests {
         let duration = Duration::from_secs(3600); // 1 hour
         assert_eq!(duration.as_secs_f64(), 3600.0);
         record_rule_apply_duration(duration);
+    }
+
+    /// Spin the server on port 0 in a background task and return the bound URL
+    /// plus a JoinHandle that can be aborted to stop the server.
+    async fn spawn_server() -> (String, tokio::task::JoinHandle<Result<()>>) {
+        // Each test gets its own recorder without binding any listener.
+        // install_recorder() is global state and would clash across parallel
+        // tests; build() also installs an exporter on a default port.
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        let server = HealthServer::new("127.0.0.1:0", handle, "test-version".into())
+            .await
+            .unwrap();
+        let addr = server.local_addr().unwrap();
+        let url = format!("http://{}", addr);
+
+        let join = tokio::spawn(server.serve());
+        // Brief settle so the listener is in accept loop before reqwest hits it.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        (url, join)
+    }
+
+    fn http() -> reqwest::Client {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_returns_healthy_json() {
+        let (url, srv) = spawn_server().await;
+        let resp = http().get(format!("{}/health", url)).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "application/json"
+        );
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["status"], "healthy");
+        assert!(body["timestamp"].is_string());
+        srv.abort();
+    }
+
+    #[tokio::test]
+    async fn ready_endpoint_includes_uptime() {
+        let (url, srv) = spawn_server().await;
+        let resp = http().get(format!("{}/ready", url)).send().await.unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["status"], "ready");
+        assert!(body["uptime_seconds"].as_i64().is_some());
+        srv.abort();
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_serves_prometheus_text() {
+        let (url, srv) = spawn_server().await;
+        let resp = http()
+            .get(format!("{}/metrics", url))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "text/plain; version=0.0.4"
+        );
+        // Body is prometheus text exposition; should at least be a valid utf-8
+        // string. Empty is acceptable when no metrics have been recorded.
+        let body = resp.text().await.unwrap();
+        let _ = body;
+        srv.abort();
+    }
+
+    #[tokio::test]
+    async fn version_endpoint_echoes_configured_version() {
+        let (url, srv) = spawn_server().await;
+        let resp = http()
+            .get(format!("{}/version", url))
+            .send()
+            .await
+            .unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["version"], "test-version");
+        // build-time/git/rust default to "unknown" without env vars.
+        assert!(body["build_time"].is_string());
+        srv.abort();
+    }
+
+    #[tokio::test]
+    async fn status_endpoint_returns_running_with_start_time() {
+        let (url, srv) = spawn_server().await;
+        let resp = http().get(format!("{}/status", url)).send().await.unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["status"], "running");
+        assert_eq!(body["version"], "test-version");
+        assert!(body["start_time"].is_string());
+        srv.abort();
+    }
+
+    #[tokio::test]
+    async fn unknown_path_returns_404() {
+        let (url, srv) = spawn_server().await;
+        let resp = http().get(format!("{}/nope", url)).send().await.unwrap();
+        assert_eq!(resp.status(), 404);
+        srv.abort();
     }
 }
