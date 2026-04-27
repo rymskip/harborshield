@@ -71,35 +71,35 @@ async fn test_cleanup_guard() {
 
     let tracker = Arc::new(CleanupTracker::builder().db(db).build());
 
-    // Test uncommitted guard (should trigger cleanup)
+    // Uncommitted guard: drop without commit cleans up its resource.
     {
-        let _guard = CleanupGuard::builder().tracker(tracker.clone()).build();
-        tracker
-            .register_rule(
-                "harborshield".to_string(),
-                "harborshield-input".to_string(),
-                99,
-            )
+        let _guard = CleanupGuard::builder()
+            .tracker(tracker.clone())
+            .resources(vec![CleanupResource::NftablesRule {
+                table: "harborshield".to_string(),
+                chain: "harborshield-input".to_string(),
+                handle: 99,
+            }])
+            .build()
             .await
             .unwrap();
-        // Guard drops here without commit
+        // guard drops here -> cleanup_subset called
     }
-
-    // Give async cleanup time to run
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    // Test committed guard (no cleanup)
+    // Committed guard: commit() unregisters resources -> no cleanup.
     {
-        let guard = CleanupGuard::builder().tracker(tracker.clone()).build();
-        tracker
-            .register_rule(
-                "harborshield".to_string(),
-                "harborshield-output".to_string(),
-                100,
-            )
+        let guard = CleanupGuard::builder()
+            .tracker(tracker.clone())
+            .resources(vec![CleanupResource::NftablesRule {
+                table: "harborshield".to_string(),
+                chain: "harborshield-output".to_string(),
+                handle: 100,
+            }])
+            .build()
             .await
             .unwrap();
-        guard.commit();
+        guard.commit().await.unwrap();
     }
 
     let tracker = Arc::try_unwrap(tracker).ok().unwrap();
@@ -207,4 +207,81 @@ async fn test_nftables_cleanup_mock() {
     // Clean up the table
     let mut nft_client = crate::nftables::NftablesClient::builder().build();
     let _ = nft_client.clear_table().await;
+}
+
+/// Drop without commit triggers per-resource cleanup. DB-only path so this
+/// runs without nftables.
+#[tokio::test]
+async fn test_cleanup_guard_drop_undoes_db_insert() {
+    let (_temp, db) = setup_test_db().await.unwrap();
+
+    db.insert_container(&crate::database::models::ContainerIdentifiers {
+        id: "drop-test".to_string(),
+        name: "drop-test-container".to_string(),
+    })
+    .await
+    .unwrap();
+    assert!(db.get_container("drop-test").await.unwrap().is_some());
+
+    let tracker = Arc::new(CleanupTracker::builder().db(db.clone()).build());
+
+    {
+        let _guard = CleanupGuard::builder()
+            .tracker(tracker.clone())
+            .resources(vec![CleanupResource::DatabaseContainer {
+                id: "drop-test".to_string(),
+            }])
+            .build()
+            .await
+            .unwrap();
+        // Drop without commit -> guard schedules cleanup_subset.
+    }
+
+    // The guard's spawned cleanup task and the worker channel both need a
+    // tick to drain.
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    assert!(
+        db.get_container("drop-test").await.unwrap().is_none(),
+        "guard drop should have cleaned up the DB row"
+    );
+
+    let tracker = Arc::try_unwrap(tracker).ok().unwrap();
+    tracker.shutdown().await.unwrap();
+}
+
+/// commit() unregisters resources so neither drop nor shutdown cleans them up.
+#[tokio::test]
+async fn test_cleanup_guard_commit_preserves_db_insert() {
+    let (_temp, db) = setup_test_db().await.unwrap();
+
+    db.insert_container(&crate::database::models::ContainerIdentifiers {
+        id: "commit-test".to_string(),
+        name: "commit-test-container".to_string(),
+    })
+    .await
+    .unwrap();
+
+    let tracker = Arc::new(CleanupTracker::builder().db(db.clone()).build());
+
+    {
+        let guard = CleanupGuard::builder()
+            .tracker(tracker.clone())
+            .resources(vec![CleanupResource::DatabaseContainer {
+                id: "commit-test".to_string(),
+            }])
+            .build()
+            .await
+            .unwrap();
+        guard.commit().await.unwrap();
+    }
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    assert!(
+        db.get_container("commit-test").await.unwrap().is_some(),
+        "committed guard must not delete its resources"
+    );
+
+    let tracker = Arc::try_unwrap(tracker).ok().unwrap();
+    tracker.shutdown().await.unwrap();
 }

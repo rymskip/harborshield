@@ -6,7 +6,7 @@ mod tests;
 
 use crate::database::DB;
 use crate::{Error, Result};
-use bon::{Builder, bon};
+use bon::bon;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -22,7 +22,7 @@ pub struct CleanupTracker {
 }
 
 #[derive(Debug, Clone)]
-enum CleanupResource {
+pub enum CleanupResource {
     NftablesRule {
         table: String,
         chain: String,
@@ -47,6 +47,10 @@ enum CleanupRequest {
     Register(CleanupResource),
     Unregister(CleanupResource),
     CleanupAll,
+    /// Clean up just the listed resources right now. Used by `CleanupGuard`
+    /// drops to undo a specific in-flight operation without flushing the
+    /// tracker's whole resource set.
+    CleanupSubset(Vec<CleanupResource>),
     Shutdown,
 }
 
@@ -80,6 +84,22 @@ impl CleanupTracker {
                                         error!("Failed to cleanup resource: {}", e);
                                     }
                                 }
+                            }
+                            CleanupRequest::CleanupSubset(targets) => {
+                                debug!(
+                                    "Cleaning up subset of {} resources",
+                                    targets.len()
+                                );
+                                for resource in &targets {
+                                    if let Err(e) = cleanup_resource(resource, &db).await {
+                                        error!("Failed to cleanup subset resource: {}", e);
+                                    }
+                                }
+                                // Drop them from the tracked list so shutdown
+                                // doesn't try to clean them up again.
+                                resources_vec.retain(|r| {
+                                    !targets.iter().any(|t| matches_resource(r, t))
+                                });
                             }
                             CleanupRequest::Shutdown => {
                                 debug!("Cleanup tracker shutting down");
@@ -183,6 +203,35 @@ impl CleanupTracker {
     pub async fn cleanup_all(&self) -> Result<()> {
         self.cleanup_tx
             .send(CleanupRequest::CleanupAll)
+            .await
+            .map_err(|_| Error::invalid_state("Cleanup tracker closed", "open", "closed"))?;
+        Ok(())
+    }
+
+    /// Cleanup only the given resources, removing them from the tracked set.
+    /// Used by `CleanupGuard` when an operation it covers is dropped without
+    /// having been committed.
+    pub async fn cleanup_subset(&self, resources: Vec<CleanupResource>) -> Result<()> {
+        self.cleanup_tx
+            .send(CleanupRequest::CleanupSubset(resources))
+            .await
+            .map_err(|_| Error::invalid_state("Cleanup tracker closed", "open", "closed"))?;
+        Ok(())
+    }
+
+    /// Send a register request for an already-constructed CleanupResource.
+    pub async fn register_resource(&self, resource: CleanupResource) -> Result<()> {
+        self.cleanup_tx
+            .send(CleanupRequest::Register(resource))
+            .await
+            .map_err(|_| Error::invalid_state("Cleanup tracker closed", "open", "closed"))?;
+        Ok(())
+    }
+
+    /// Send an unregister request for an already-constructed CleanupResource.
+    pub async fn unregister_resource(&self, resource: CleanupResource) -> Result<()> {
+        self.cleanup_tx
+            .send(CleanupRequest::Unregister(resource))
             .await
             .map_err(|_| Error::invalid_state("Cleanup tracker closed", "open", "closed"))?;
         Ok(())
@@ -566,30 +615,5 @@ async fn cleanup_resource(resource: &CleanupResource, db: &Arc<DB>) -> Result<()
     }
 }
 
-/// Guard that automatically cleans up resources on drop
-#[derive(Builder)]
-pub struct CleanupGuard {
-    tracker: Arc<CleanupTracker>,
-    #[builder(default = false)]
-    committed: bool,
-}
-
-impl CleanupGuard {
-    /// Mark the operation as committed (no cleanup needed)
-    pub fn commit(mut self) {
-        self.committed = true;
-    }
-}
-
-impl Drop for CleanupGuard {
-    fn drop(&mut self) {
-        if !self.committed {
-            let tracker = self.tracker.clone();
-            tokio::spawn(async move {
-                if let Err(e) = tracker.cleanup_all().await {
-                    error!("Failed to cleanup resources on guard drop: {}", e);
-                }
-            });
-        }
-    }
-}
+// CleanupGuard lives in `cleanup::guard`; re-export for ergonomic access.
+pub use guard::CleanupGuard;

@@ -2,7 +2,8 @@ use crate::{
     Result,
     database::ContainerIdentifiers,
     docker::{compose::ComposeInfo, config::RulePorts, container::Container},
-    nftables::transaction::RuleSet,
+    handlers::cleanup::{CleanupGuard, CleanupResource},
+    nftables::{FILTER_TABLE, transaction::RuleSet},
     server,
 };
 use std::collections::HashMap;
@@ -27,6 +28,23 @@ impl Harborshield {
             );
             return Ok(());
         }
+
+        // Register cleanup *before* we touch the kernel, so any `?` below
+        // triggers the guard's drop path and reverses the partial creation.
+        // We commit at the end on success.
+        let chain_name = format!(
+            "hs-{}-{}",
+            container.name.replace(['_', '.', '/'], "-"),
+            &container.id[..12.min(container.id.len())]
+        );
+        let guard = CleanupGuard::builder()
+            .tracker(self.cleanup_tracker.clone())
+            .resources(vec![CleanupResource::NftablesChain {
+                table: FILTER_TABLE.to_string(),
+                chain: chain_name,
+            }])
+            .build()
+            .await?;
 
         // Get container IPs
         let mut container_ips: Vec<std::net::IpAddr> = Vec::new();
@@ -186,6 +204,8 @@ impl Harborshield {
             }
         }
 
+        // Container chain + rules are in place; disarm cleanup.
+        guard.commit().await?;
         Ok(())
     }
     /// Log Docker Compose information if present
