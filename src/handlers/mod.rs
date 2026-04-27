@@ -7,7 +7,7 @@ pub mod utils;
 
 use crate::{
     Result,
-    database::{ContainerIdentifiers, DbOp},
+    database::{ContainerIdentifiers, queries},
     nftables::transaction::RuleSet,
 };
 use bollard::models::EventMessage;
@@ -390,13 +390,9 @@ impl Harborshield {
             let db_lock = self.db.lock().await;
 
             // Get rules for the container name
-            let mut rules = match db_lock
-                .execute(&DbOp::GetWaitingRulesForContainer(container_name))
-                .await?
-            {
-                crate::database::DbOpResult::WaitingRules(rules) => rules,
-                _ => vec![],
-            };
+            let mut rules = db_lock
+                .get_waiting_rules_for_container(container_name)
+                .await?;
             all_waiting_rules.append(&mut rules);
 
             // Get rules for any aliases
@@ -406,13 +402,8 @@ impl Harborshield {
                 .find_container(container_id)
             {
                 for alias in &container.aliases {
-                    let mut alias_rules = match db_lock
-                        .execute(&DbOp::GetWaitingRulesForContainer(alias))
-                        .await?
-                    {
-                        crate::database::DbOpResult::WaitingRules(rules) => rules,
-                        _ => vec![],
-                    };
+                    let mut alias_rules =
+                        db_lock.get_waiting_rules_for_container(alias).await?;
                     all_waiting_rules.append(&mut alias_rules);
                 }
             }
@@ -489,22 +480,23 @@ impl Harborshield {
             }
 
             // Remove processed waiting rules from database
-            let mut db_lock = self.db.lock().await;
-
-            let mut ops = vec![];
-            for waiting_rule in &all_waiting_rules {
-                ops.push(DbOp::DeleteWaitingRule {
-                    src_container_id: &waiting_rule.src_container_id,
-                    dst_container_name: &waiting_rule.dst_container_name,
-                });
-            }
-
-            if !ops.is_empty() {
+            if !all_waiting_rules.is_empty() {
+                let pairs: Vec<(String, String)> = all_waiting_rules
+                    .iter()
+                    .map(|r| {
+                        (r.src_container_id.clone(), r.dst_container_name.clone())
+                    })
+                    .collect();
+                let db_lock = self.db.lock().await;
                 db_lock
-                    .transaction()
-                    .execute_ops(&ops)
-                    .await?
-                    .commit()
+                    .with_transaction(|tx| {
+                        Box::pin(async move {
+                            for (src, dst) in &pairs {
+                                queries::delete_waiting_rule_tx(tx, src, dst).await?;
+                            }
+                            Ok(())
+                        })
+                    })
                     .await?;
             }
 
@@ -528,13 +520,7 @@ impl Harborshield {
         &self,
     ) -> Result<HashMap<String, ContainerIdentifiers>> {
         let db = self.db.lock().await;
-        use crate::database::{DbOp, DbOpResult};
-
-        let db_containers = match db.execute(&DbOp::ListContainers).await? {
-            DbOpResult::Containers(containers) => containers,
-            _ => vec![],
-        };
-
+        let db_containers = db.list_containers().await?;
         Ok(db_containers
             .into_iter()
             .map(|c| (c.id.clone(), c))

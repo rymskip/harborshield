@@ -548,9 +548,7 @@ impl Harborshield {
                 };
 
                 let db_lock = self.db.lock().await;
-                db_lock
-                    .execute(&crate::database::DbOp::InsertWaitingRule(&waiting_rule))
-                    .await?;
+                db_lock.insert_waiting_rule(&waiting_rule).await?;
                 drop(db_lock);
 
                 info!(
@@ -655,8 +653,7 @@ impl Harborshield {
         transaction.commit().await?;
 
         let db = self.db.lock().await;
-        use crate::database::DbOp;
-        db.execute(&DbOp::DeleteContainer(container_id)).await?;
+        db.delete_container(container_id).await?;
 
         Ok(())
     }

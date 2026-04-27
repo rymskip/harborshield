@@ -206,17 +206,9 @@ impl Harborshield {
 
         // Clear database
         let db = self.db.lock().await;
-        use crate::database::{DbOp, DbOpResult};
-
-        // Get all containers from database
-        let containers = match db.execute(&DbOp::ListContainers).await? {
-            DbOpResult::Containers(containers) => containers,
-            _ => vec![],
-        };
-
-        // Clear all containers from database
+        let containers = db.list_containers().await?;
         for container in containers {
-            db.execute(&DbOp::DeleteContainer(&container.id)).await?;
+            db.delete_container(&container.id).await?;
         }
         drop(db);
 

@@ -447,24 +447,23 @@ async fn cleanup_resource(resource: &CleanupResource, db: &Arc<Mutex<DB>>) -> Re
         CleanupResource::DatabaseContainer { id } => {
             warn!("Cleaning up database container: id={}", id);
 
-            // Lock the database
-            let mut db_guard = db.lock().await;
-
-            use crate::database::DbOp;
-
-            // Define the operations to execute
-            let ops = vec![
-                DbOp::DeleteAddrsByContainer(id),
-                DbOp::DeleteContainerAliases(id),
-                DbOp::DeleteWaitingRules(id),
-                DbOp::DeleteContainer(id),
-            ];
-
-            // Execute operations in transaction
-            match db_guard.transaction().execute_ops(&ops).await {
-                Ok(executed) => {
-                    // Commit the transaction
-                    executed.commit().await?;
+            let db_guard = db.lock().await;
+            let id_owned = id.clone();
+            match db_guard
+                .with_transaction(|tx| {
+                    Box::pin(async move {
+                        crate::database::queries::delete_addrs_by_container_tx(tx, &id_owned)
+                            .await?;
+                        crate::database::queries::delete_container_aliases_tx(tx, &id_owned)
+                            .await?;
+                        crate::database::queries::delete_waiting_rules_tx(tx, &id_owned).await?;
+                        crate::database::queries::delete_container_tx(tx, &id_owned).await?;
+                        Ok(())
+                    })
+                })
+                .await
+            {
+                Ok(()) => {
                     info!("Successfully cleaned up database container {}", id);
                     Ok(())
                 }

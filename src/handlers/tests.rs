@@ -8,25 +8,18 @@ async fn test_delete_waiting_rule() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test.db");
 
-    // Create database
     let db = Arc::new(Mutex::new(
-        DB::builder()
-            .db_path(&db_path)
-            .build()
-            .await
-            .map_err(|e| e)
-            .unwrap(),
+        DB::builder().db_path(&db_path).build().await.unwrap(),
     ));
 
     // Insert a source container
     {
         let db_lock = db.lock().await;
-        use crate::database::DbOp;
         db_lock
-            .execute(&DbOp::InsertContainer(&ContainerIdentifiers {
+            .insert_container(&ContainerIdentifiers {
                 id: "source-container".to_string(),
                 name: "source".to_string(),
-            }))
+            })
             .await
             .unwrap();
     }
@@ -38,70 +31,49 @@ async fn test_delete_waiting_rule() {
         "dst_ports": [80, 443],
         "log_prefix": "test-rule",
     });
-
     let serialized_rule = serde_json::to_vec(&rule_data).unwrap();
 
-    // Insert waiting rule
     {
         let db_lock = db.lock().await;
-        use crate::database::DbOp;
         db_lock
-            .execute(&DbOp::InsertWaitingRule(&WaitingContainerRule {
+            .insert_waiting_rule(&WaitingContainerRule {
                 src_container_id: "source-container".to_string(),
                 dst_container_name: "target-container".to_string(),
                 rule: serialized_rule.clone(),
-            }))
-            .await
-            .unwrap();
-    }
-
-    // Verify waiting rule was stored
-    {
-        let db_lock = db.lock().await;
-        use crate::database::{DbOp, DbOpResult};
-        let result = db_lock
-            .execute(&DbOp::GetWaitingRulesForContainer("target-container"))
-            .await
-            .unwrap();
-
-        if let DbOpResult::WaitingRules(waiting_rules) = result {
-            assert_eq!(waiting_rules.len(), 1);
-            assert_eq!(waiting_rules[0].src_container_id, "source-container");
-            assert_eq!(waiting_rules[0].dst_container_name, "target-container");
-
-            let parsed: serde_json::Value =
-                serde_json::from_slice(&waiting_rules[0].rule).unwrap();
-            assert_eq!(parsed["protocol"], "tcp");
-            assert_eq!(parsed["dst_ports"], serde_json::json!([80, 443]));
-            assert_eq!(parsed["log_prefix"], "test-rule");
-        } else {
-            panic!("Expected WaitingRules result");
-        }
-    }
-
-    // Test deletion of waiting rule
-    {
-        let db_lock = db.lock().await;
-        use crate::database::{DbOp, DbOpResult};
-        db_lock
-            .execute(&DbOp::DeleteWaitingRule {
-                src_container_id: "source-container",
-                dst_container_name: "target-container",
             })
             .await
             .unwrap();
+    }
 
-        // Verify it was deleted
-        let result = db_lock
-            .execute(&DbOp::GetWaitingRulesForContainer("target-container"))
+    {
+        let db_lock = db.lock().await;
+        let waiting_rules = db_lock
+            .get_waiting_rules_for_container("target-container")
+            .await
+            .unwrap();
+        assert_eq!(waiting_rules.len(), 1);
+        assert_eq!(waiting_rules[0].src_container_id, "source-container");
+        assert_eq!(waiting_rules[0].dst_container_name, "target-container");
+
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&waiting_rules[0].rule).unwrap();
+        assert_eq!(parsed["protocol"], "tcp");
+        assert_eq!(parsed["dst_ports"], serde_json::json!([80, 443]));
+        assert_eq!(parsed["log_prefix"], "test-rule");
+    }
+
+    {
+        let db_lock = db.lock().await;
+        db_lock
+            .delete_waiting_rule("source-container", "target-container")
             .await
             .unwrap();
 
-        if let DbOpResult::WaitingRules(waiting_rules) = result {
-            assert_eq!(waiting_rules.len(), 0);
-        } else {
-            panic!("Expected WaitingRules result");
-        }
+        let waiting_rules = db_lock
+            .get_waiting_rules_for_container("target-container")
+            .await
+            .unwrap();
+        assert!(waiting_rules.is_empty());
     }
 }
 
@@ -170,7 +142,7 @@ fn test_waiting_rule_serde_json_forward_compatibility() {
 
 #[tokio::test]
 async fn test_get_container_by_alias() {
-    use crate::database::{ContainerAlias, DbOp, DbOpResult};
+    use crate::database::ContainerAlias;
 
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test.db");
@@ -181,32 +153,27 @@ async fn test_get_container_by_alias() {
     {
         let db_lock = db.lock().await;
         db_lock
-            .execute(&DbOp::InsertContainer(&ContainerIdentifiers {
+            .insert_container(&ContainerIdentifiers {
                 id: "container123".to_string(),
                 name: "test-container".to_string(),
-            }))
+            })
             .await
             .unwrap();
         db_lock
-            .execute(&DbOp::InsertContainerAlias(&ContainerAlias {
+            .insert_container_alias(&ContainerAlias {
                 container_id: "container123".to_string(),
                 container_alias: "my-alias".to_string(),
-            }))
+            })
             .await
             .unwrap();
     }
 
     let db_lock = db.lock().await;
-    let result = db_lock
-        .execute(&DbOp::GetContainerByAlias("my-alias"))
+    let resolved = db_lock
+        .get_container_by_alias("my-alias")
         .await
-        .unwrap();
-    match result {
-        DbOpResult::ContainerIdentifiers(Some(c)) => {
-            assert_eq!(c.id, "container123");
-            assert_eq!(c.name, "test-container");
-        }
-        DbOpResult::ContainerIdentifiers(None) => panic!("alias did not resolve"),
-        _ => panic!("Expected ContainerIdentifiers result"),
-    }
+        .unwrap()
+        .expect("alias did not resolve");
+    assert_eq!(resolved.id, "container123");
+    assert_eq!(resolved.name, "test-container");
 }

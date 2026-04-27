@@ -119,36 +119,24 @@ async fn test_database_cleanup() {
     // Insert test data
     {
         let db_guard = db.lock().await;
-        use crate::database::{DbOp, DbOpResult};
-
-        // Insert a container
         db_guard
-            .execute(&DbOp::InsertContainer(
-                &crate::database::models::ContainerIdentifiers {
-                    id: "test123".to_string(),
-                    name: "test-container".to_string(),
-                },
-            ))
+            .insert_container(&crate::database::models::ContainerIdentifiers {
+                id: "test123".to_string(),
+                name: "test-container".to_string(),
+            })
             .await
             .unwrap();
 
-        // Insert related data
         let addr = crate::database::models::Addr::from_ip(
             std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 10)),
             "test123".to_string(),
         );
-        db_guard.execute(&DbOp::InsertAddr(&addr)).await.unwrap();
+        db_guard.insert_addr(&addr).await.unwrap();
 
-        // Verify data was inserted
-        let result = db_guard
-            .execute(&DbOp::GetContainer("test123"))
-            .await
-            .unwrap();
-        if let DbOpResult::ContainerIdentifiers(container) = result {
-            assert!(container.is_some(), "Container should exist after insert");
-        } else {
-            panic!("Expected Container result");
-        }
+        assert!(
+            db_guard.get_container("test123").await.unwrap().is_some(),
+            "Container should exist after insert"
+        );
     }
 
     let tracker = Arc::new(CleanupTracker::builder().db(db.clone()).build());
@@ -168,16 +156,10 @@ async fn test_database_cleanup() {
     // Verify container was deleted
     {
         let db_guard = db.lock().await;
-        use crate::database::{DbOp, DbOpResult};
-        let result = db_guard
-            .execute(&DbOp::GetContainer("test123"))
-            .await
-            .unwrap();
-        if let DbOpResult::ContainerIdentifiers(container) = result {
-            assert!(container.is_none(), "Container should have been cleaned up");
-        } else {
-            panic!("Expected Container result");
-        }
+        assert!(
+            db_guard.get_container("test123").await.unwrap().is_none(),
+            "Container should have been cleaned up"
+        );
     }
 
     let tracker = Arc::try_unwrap(tracker).ok().unwrap();

@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT c.id, c.name \n                   FROM containers c \n                   JOIN container_aliases ca ON c.id = ca.container_id \n                   WHERE ca.container_alias = ?",
+  "query": "SELECT c.id, c.name\n                   FROM containers c\n                   JOIN container_aliases ca ON c.id = ca.container_id\n                   WHERE ca.container_alias = ?",
   "describe": {
     "columns": [
       {
@@ -22,5 +22,5 @@
       false
     ]
   },
-  "hash": "7f936ac0609485b058fa4a29eb536ef41f7934bfd38c5dd1442ace1700d80323"
+  "hash": "c2389cb828b3a4bddf050839722cee486ff2d4016e40523a5e4e02e2732f85a2"
 }
