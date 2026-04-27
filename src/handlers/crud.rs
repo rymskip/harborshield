@@ -5,7 +5,7 @@ use crate::{
         Addr, ContainerAlias, DB, DbOp, WaitingContainerRule, models::ContainerIdentifiers,
     },
     docker::container::Container,
-    nftables::transaction::NftablesTransaction,
+    nftables::transaction::RuleSet,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -347,7 +347,7 @@ impl Harborshield {
 
             // We no longer need to remove from vmap - verdict maps are rebuilt dynamically
 
-            let mut transaction = NftablesTransaction::builder().build();
+            let mut transaction = RuleSet::builder().build();
             transaction.remove_container_rules(&container.id, &container.name)?;
             transaction.commit().await?;
 

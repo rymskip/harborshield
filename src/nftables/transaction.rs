@@ -1,23 +1,27 @@
 use crate::Result;
 use crate::docker::config::{Config, RuleContext, ToNftablesRule};
 use crate::nftables::FILTER_TABLE;
-use crate::nftables::common::helpers::family_to_string;
 use bon::Builder;
 use nftables::schema::{FlushObject, NfCmd};
 use nftables::{
     batch::Batch,
-    helper::{NftablesError, get_current_ruleset_raw},
+    helper::NftablesError,
     schema::{Chain, NfListObject, Rule},
     stmt::{Counter, Log, LogLevel, Statement},
     types::NfFamily,
 };
 use serde_json;
 use std::borrow::Cow;
-use tracing::{debug, info};
+use tracing::info;
 
+/// A pure-data nftables rule set under construction.
+///
+/// `RuleSet` accumulates `Batch` operations and deferred DROP rules without
+/// touching the kernel. The only impure call is [`RuleSet::commit`], which
+/// serializes the batch and shells out to `nft`. Build, mutate, and snapshot
+/// `RuleSet`s freely; commit when you're ready to apply.
 #[derive(Builder)]
-/// Transaction wrapper for atomic operations
-pub struct NftablesTransaction {
+pub struct RuleSet {
     #[builder(default = Batch::new())]
     pub batch: Batch<'static>,
     #[builder(default = NfFamily::IP)]
@@ -26,58 +30,11 @@ pub struct NftablesTransaction {
     pub deferred_drop_rules: Vec<Rule<'static>>,
 }
 
-impl NftablesTransaction {
-    /// Delete an nftables object
+impl RuleSet {
+    /// Add a delete operation for `obj` to the batch.
+    ///
+    /// Pure: stages the delete; nothing is sent to the kernel until `commit`.
     pub fn delete(&mut self, obj: NfListObject<'static>) {
-        // Dump ruleset for the specific object being deleted
-        let args = match &obj {
-            NfListObject::Chain(chain) => {
-                // For chains, dump the specific chain rules
-                vec![
-                    "list".to_string(),
-                    "chain".to_string(),
-                    family_to_string(&chain.family).to_string(),
-                    chain.table.to_string(),
-                    chain.name.to_string(),
-                ]
-            }
-            NfListObject::Rule(rule) => {
-                // For rules, dump the chain containing the rule
-                vec![
-                    "list".to_string(),
-                    "chain".to_string(),
-                    family_to_string(&rule.family).to_string(),
-                    rule.table.to_string(),
-                    rule.chain.to_string(),
-                ]
-            }
-            NfListObject::Table(table) => {
-                // For tables, dump the entire table
-                vec![
-                    "list".to_string(),
-                    "table".to_string(),
-                    family_to_string(&table.family).to_string(),
-                    table.name.to_string(),
-                ]
-            }
-            _ => {
-                // For other objects, just dump the full ruleset
-                vec!["list".to_string(), "ruleset".to_string()]
-            }
-        };
-
-        match get_current_ruleset_raw::<String, String, _>(None, &args) {
-            Ok(ruleset) => {
-                debug!(
-                    "Ruleset dump for item being deleted - {:#?}:\n{:#?}",
-                    obj, ruleset
-                );
-            }
-            Err(e) => {
-                debug!("Failed to get ruleset dump before deletion: {:#?}", e);
-            }
-        }
-
         self.batch.delete(obj);
     }
 
@@ -198,7 +155,7 @@ impl NftablesTransaction {
     /// Add container chain to a transaction
     pub fn add_container_chain_to_transaction(
         family: NfFamily,
-        transaction: &mut NftablesTransaction,
+        transaction: &mut RuleSet,
         container_id: &str,
         container_name: &str,
     ) -> Result<String> {
@@ -227,7 +184,7 @@ impl NftablesTransaction {
     /// Add DROP rule to a transaction
     pub fn add_container_drop_rule_to_transaction(
         family: NfFamily,
-        transaction: &mut NftablesTransaction,
+        transaction: &mut RuleSet,
         container_id: &str,
         container_name: &str,
     ) -> Result<()> {
@@ -269,7 +226,7 @@ impl NftablesTransaction {
     /// Add container rules to a transaction (this method remains for compatibility but now delegates to config-based method)
     pub fn add_container_rules_to_transaction(
         family: NfFamily,
-        transaction: &mut NftablesTransaction,
+        transaction: &mut RuleSet,
         container_id: &str,
         container_name: &str,
         container_ips: &[std::net::IpAddr],
@@ -579,6 +536,16 @@ impl NftablesTransaction {
 
         Ok(())
     }
+
+    /// Snapshot the current ruleset (including deferred drop rules) as JSON,
+    /// without applying anything. Useful for `--dry-run` and for snapshot tests.
+    pub fn dry_run_json(&self) -> Result<serde_json::Value> {
+        let mut batch_clone = self.batch.clone();
+        for rule in &self.deferred_drop_rules {
+            batch_clone.add(NfListObject::Rule(rule.clone()));
+        }
+        serde_json::to_value(batch_clone.to_nftables()).map_err(crate::Error::Json)
+    }
 }
 
 #[cfg(test)]
@@ -664,14 +631,14 @@ mod tests {
 
     #[test]
     fn test_transaction_builder_default() {
-        let transaction = NftablesTransaction::builder().build();
+        let transaction = RuleSet::builder().build();
         assert_eq!(transaction.family, NfFamily::IP);
         assert!(transaction.deferred_drop_rules.is_empty());
     }
 
     #[test]
     fn test_transaction_builder_with_family() {
-        let transaction = NftablesTransaction::builder()
+        let transaction = RuleSet::builder()
             .family(NfFamily::IP6)
             .build();
         assert_eq!(transaction.family, NfFamily::IP6);
@@ -679,7 +646,7 @@ mod tests {
 
     #[test]
     fn test_flush_chain_adds_command() {
-        let mut transaction = NftablesTransaction::builder().build();
+        let mut transaction = RuleSet::builder().build();
         transaction.flush_chain("filter", "test-chain");
         // The batch should now contain a flush command
         // We can't easily inspect the batch, but we can verify no panic occurred
@@ -689,7 +656,7 @@ mod tests {
     use nftables::schema::{NfCmd, NfObject};
     use std::net::{IpAddr, Ipv4Addr};
 
-    fn count_chain_adds(tx: &NftablesTransaction, expected_chain: &str) -> usize {
+    fn count_chain_adds(tx: &RuleSet, expected_chain: &str) -> usize {
         let nft = tx.batch.clone().to_nftables();
         nft.objects
             .iter()
@@ -700,7 +667,7 @@ mod tests {
             .count()
     }
 
-    fn count_rule_adds_in_chain(tx: &NftablesTransaction, chain: &str) -> usize {
+    fn count_rule_adds_in_chain(tx: &RuleSet, chain: &str) -> usize {
         let nft = tx.batch.clone().to_nftables();
         nft.objects
             .iter()
@@ -715,8 +682,8 @@ mod tests {
     fn chain_name_sanitizes_special_chars_and_truncates_id() {
         // Underscores, dots, slashes in container names get replaced with `-`,
         // and only the first 12 chars of the id are kept.
-        let mut tx = NftablesTransaction::builder().build();
-        let chain = NftablesTransaction::add_container_chain_to_transaction(
+        let mut tx = RuleSet::builder().build();
+        let chain = RuleSet::add_container_chain_to_transaction(
             NfFamily::IP,
             &mut tx,
             "abcdef0123456789deadbeef",
@@ -731,8 +698,8 @@ mod tests {
     #[test]
     fn chain_name_for_short_id_does_not_panic() {
         // A 4-char id should not trigger an out-of-bounds slice.
-        let mut tx = NftablesTransaction::builder().build();
-        let chain = NftablesTransaction::add_container_chain_to_transaction(
+        let mut tx = RuleSet::builder().build();
+        let chain = RuleSet::add_container_chain_to_transaction(
             NfFamily::IP,
             &mut tx,
             "abcd",
@@ -744,8 +711,8 @@ mod tests {
 
     #[test]
     fn drop_rule_is_deferred_with_counter_log_drop_and_correct_chain() {
-        let mut tx = NftablesTransaction::builder().build();
-        NftablesTransaction::add_container_drop_rule_to_transaction(
+        let mut tx = RuleSet::builder().build();
+        RuleSet::add_container_drop_rule_to_transaction(
             NfFamily::IP,
             &mut tx,
             "deadbeefcafebabe",
@@ -784,7 +751,7 @@ mod tests {
 
     #[test]
     fn mapped_ports_localhost_allow_emits_one_rule_per_tcp_port() {
-        let mut tx = NftablesTransaction::builder().build();
+        let mut tx = RuleSet::builder().build();
         let cfg = Config::builder()
             .mapped_ports(
                 MappedPorts::builder()
@@ -793,7 +760,7 @@ mod tests {
             )
             .build();
 
-        NftablesTransaction::add_container_rules_to_transaction(
+        RuleSet::add_container_rules_to_transaction(
             NfFamily::IP,
             &mut tx,
             "deadbeefcafebabe",
@@ -810,11 +777,11 @@ mod tests {
 
     #[test]
     fn mapped_ports_disabled_emits_no_rules() {
-        let mut tx = NftablesTransaction::builder().build();
+        let mut tx = RuleSet::builder().build();
         // Default Config has mapped_ports.localhost.allow = false and external.allow = false.
         let cfg = Config::builder().build();
 
-        NftablesTransaction::add_container_rules_to_transaction(
+        RuleSet::add_container_rules_to_transaction(
             NfFamily::IP,
             &mut tx,
             "deadbeefcafebabe",
@@ -830,7 +797,7 @@ mod tests {
 
     #[test]
     fn flush_chain_adds_flush_command() {
-        let mut tx = NftablesTransaction::builder().build();
+        let mut tx = RuleSet::builder().build();
         tx.flush_chain("filter", "hs-svc-abcdef012345");
 
         let nft = tx.batch.clone().to_nftables();
@@ -840,5 +807,86 @@ mod tests {
             .filter(|o| matches!(o, NfObject::CmdObject(NfCmd::Flush(_))))
             .count();
         assert_eq!(flush_count, 1);
+    }
+
+    #[test]
+    fn dry_run_json_includes_deferred_drop_rules() {
+        let mut tx = RuleSet::builder().build();
+        let chain = RuleSet::add_container_chain_to_transaction(
+            NfFamily::IP,
+            &mut tx,
+            "deadbeefcafebabe",
+            "svc",
+        )
+        .unwrap();
+        RuleSet::add_container_drop_rule_to_transaction(
+            NfFamily::IP,
+            &mut tx,
+            "deadbeefcafebabe",
+            "svc",
+        )
+        .unwrap();
+
+        // Deferred drop rules don't show up in the live batch yet…
+        let live = tx.batch.clone().to_nftables();
+        let live_rule_count = live
+            .objects
+            .iter()
+            .filter(|o| matches!(o, NfObject::CmdObject(NfCmd::Add(NfListObject::Rule(_)))))
+            .count();
+        assert_eq!(live_rule_count, 0);
+
+        // …but dry_run_json folds them in so callers see what commit would emit.
+        let snapshot = tx.dry_run_json().unwrap();
+        let snapshot_str = serde_json::to_string(&snapshot).unwrap();
+        assert!(snapshot_str.contains(&chain));
+        assert!(snapshot_str.contains("DROP"));
+    }
+
+    #[test]
+    fn rebuild_chain_pattern_is_one_atomic_batch() {
+        // The rebuild flow should produce: 1 flush + N rule adds + (deferred) drop.
+        // Everything in one batch -> nft commits atomically.
+        let mut tx = RuleSet::builder().build();
+        let cfg = Config::builder()
+            .mapped_ports(
+                MappedPorts::builder()
+                    .localhost(LocalRules::builder().allow(true).build())
+                    .build(),
+            )
+            .build();
+
+        let chain = "hs-svc-deadbeefcafe";
+        tx.flush_chain("filter", chain);
+        RuleSet::add_container_rules_to_transaction(
+            NfFamily::IP,
+            &mut tx,
+            "deadbeefcafebabe",
+            "svc",
+            &[std::net::IpAddr::V4(std::net::Ipv4Addr::new(172, 17, 0, 2))],
+            &[(80, "tcp".to_string()), (443, "tcp".to_string())],
+            &cfg,
+        )
+        .unwrap();
+        RuleSet::add_container_drop_rule_to_transaction(
+            NfFamily::IP,
+            &mut tx,
+            "deadbeefcafebabe",
+            "svc",
+        )
+        .unwrap();
+
+        let snapshot = tx.dry_run_json().unwrap();
+        let objs = snapshot["nftables"].as_array().unwrap();
+
+        // 1 flush + 2 add-rule (mapped ports) + 1 add-rule (deferred drop) = 4
+        let flush_count = objs.iter().filter(|o| o.get("flush").is_some()).count();
+        let add_rule_count = objs
+            .iter()
+            .filter_map(|o| o.get("add"))
+            .filter(|a| a.get("rule").is_some())
+            .count();
+        assert_eq!(flush_count, 1);
+        assert_eq!(add_rule_count, 3);
     }
 }

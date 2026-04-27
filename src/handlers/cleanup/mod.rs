@@ -283,7 +283,7 @@ async fn cleanup_resource(resource: &CleanupResource, db: &Arc<Mutex<DB>>) -> Re
 
                 // Create a transaction to delete the rule
                 let mut transaction =
-                    crate::nftables::transaction::NftablesTransaction::builder().build();
+                    crate::nftables::transaction::RuleSet::builder().build();
 
                 // Create a rule object with the handle for deletion
                 let rule = nftables::schema::Rule {
@@ -340,7 +340,7 @@ async fn cleanup_resource(resource: &CleanupResource, db: &Arc<Mutex<DB>>) -> Re
 
                 // Create a transaction to delete the chain
                 let mut transaction =
-                    crate::nftables::transaction::NftablesTransaction::builder().build();
+                    crate::nftables::transaction::RuleSet::builder().build();
 
                 // First, flush all rules from the chain
                 transaction.flush_chain(table, chain);
@@ -399,7 +399,7 @@ async fn cleanup_resource(resource: &CleanupResource, db: &Arc<Mutex<DB>>) -> Re
 
                 // Create a transaction to delete the set
                 let mut transaction =
-                    crate::nftables::transaction::NftablesTransaction::builder().build();
+                    crate::nftables::transaction::RuleSet::builder().build();
 
                 // Create a set object for deletion
                 let set_obj = Box::new(nftables::schema::Set {

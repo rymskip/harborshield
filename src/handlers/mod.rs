@@ -8,7 +8,7 @@ pub mod utils;
 use crate::{
     Result,
     database::{ContainerIdentifiers, DbOp},
-    nftables::transaction::NftablesTransaction,
+    nftables::transaction::RuleSet,
 };
 use bollard::models::EventMessage;
 use futures::StreamExt;
@@ -304,7 +304,7 @@ impl Harborshield {
             self.remove_container_from_database(container_id).await?;
 
             // Now we can safely remove the container chain
-            let mut transaction = NftablesTransaction::builder().build();
+            let mut transaction = RuleSet::builder().build();
             transaction.remove_container_rules(container_id, &details.name)?;
             transaction.commit().await?;
         }
@@ -328,7 +328,7 @@ impl Harborshield {
 
             // Disable firewall rules for paused container
             let mut nftables = self.nftables_client.lock().await;
-            let mut transaction = NftablesTransaction::builder().build();
+            let mut transaction = RuleSet::builder().build();
             nftables.disable_container_rules(&mut transaction, container_id, &details.name)?;
             transaction.commit().await?;
 

@@ -2,7 +2,7 @@ use crate::{
     Result,
     database::ContainerIdentifiers,
     docker::{compose::ComposeInfo, config::RulePorts, container::Container},
-    nftables::transaction::NftablesTransaction,
+    nftables::transaction::RuleSet,
     server,
 };
 use std::collections::HashMap;
@@ -410,12 +410,12 @@ impl Harborshield {
 
                                 // Create the chain (but not the rules yet, as the container might not have IPs)
                                 let nftables = self.nftables_client.lock().await;
-                                let mut transaction = NftablesTransaction::builder()
+                                let mut transaction = RuleSet::builder()
                                     .family(nftables.family)
                                     .build();
 
                                 let _chain_name =
-                                    NftablesTransaction::add_container_chain_to_transaction(
+                                    RuleSet::add_container_chain_to_transaction(
                                         nftables.family,
                                         &mut transaction,
                                         &container.id,
@@ -423,7 +423,7 @@ impl Harborshield {
                                     )?;
 
                                 // Add DROP rule at the end
-                                NftablesTransaction::add_container_drop_rule_to_transaction(
+                                RuleSet::add_container_drop_rule_to_transaction(
                                     nftables.family,
                                     &mut transaction,
                                     &container.id,
@@ -650,7 +650,7 @@ impl Harborshield {
         // Note: We don't have container IPs here, but that's okay because
         // the container is already stopped and IPs may have been released
 
-        let mut transaction = NftablesTransaction::builder().build();
+        let mut transaction = RuleSet::builder().build();
         transaction.remove_container_rules(container_id, container_name)?;
         transaction.commit().await?;
 

@@ -1,3 +1,22 @@
+//! Nftables integration: rule generation and kernel application.
+//!
+//! ## Pure vs. impure
+//!
+//! [`transaction::RuleSet`] is the pure value type — it accumulates batch
+//! operations and deferred drop rules without touching the kernel. Build,
+//! mutate, and snapshot `RuleSet`s freely.
+//!
+//! [`NftablesClient`] is the impure boundary. Functions here that mutate
+//! kernel state ([`NftablesClient::apply`], [`NftablesClient::clear_table`],
+//! [`NftablesClient::init_base_chains`],
+//! [`NftablesClient::update_container_verdict_maps`],
+//! [`NftablesClient::rebuild_container_chain`]) shell out to `nft` or invoke
+//! [`nftables::helper::apply_and_return_ruleset`] under the hood.
+//!
+//! Rule-construction helpers on `RuleSet` (e.g.
+//! [`transaction::RuleSet::add_container_chain_to_transaction`],
+//! [`transaction::RuleSet::add_container_rules_to_transaction`]) are pure;
+//! call them, then commit the resulting `RuleSet` once.
 mod common;
 pub mod docker;
 pub mod error;
@@ -11,7 +30,7 @@ use crate::{
             check_docker_chains, check_harborshield_chain_exists, check_jump_rules_exist,
             create_harborshield_chain, create_jump_rules,
         },
-        transaction::NftablesTransaction,
+        transaction::RuleSet,
     },
 };
 use bon::Builder;
@@ -541,7 +560,11 @@ impl NftablesClient {
         Ok(())
     }
 
-    /// Rebuild container chain with config
+    /// Rebuild container chain with config.
+    ///
+    /// Flush + re-add are batched into a single nftables transaction so the
+    /// chain never appears empty to the kernel — this is atomic relative to
+    /// in-flight packets.
     pub async fn rebuild_container_chain(
         &mut self,
         container_id: &str,
@@ -556,32 +579,12 @@ impl NftablesClient {
             &container_id[..12.min(container_id.len())]
         );
 
-        // First, flush the chain to remove all existing rules
-        let flush_output = std::process::Command::new("nft")
-            .args(&["flush", "chain", "ip", FILTER_TABLE, &chain_name])
-            .output()
-            .map_err(|e| Error::Nftables {
-                message: format!("Failed to flush container chain: {}", e),
-                command: Some(format!(
-                    "nft flush chain ip {} {}",
-                    FILTER_TABLE, &chain_name
-                )),
-                exit_code: None,
-                stderr: Some(e.to_string()),
-            })?;
-
-        if !flush_output.status.success() {
-            debug!(
-                "Failed to flush container chain (may not exist yet): {}",
-                String::from_utf8_lossy(&flush_output.stderr)
-            );
-        }
-
-        // Create a transaction to add all rules in correct order
-        let mut transaction = NftablesTransaction::builder().family(self.family).build();
+        // Build one batch: flush + new rules. nft commits atomically.
+        let mut transaction = RuleSet::builder().family(self.family).build();
+        transaction.flush_chain(FILTER_TABLE, &chain_name);
 
         // Add rules from config
-        NftablesTransaction::add_container_rules_to_transaction(
+        RuleSet::add_container_rules_to_transaction(
             self.family,
             &mut transaction,
             container_id,
@@ -598,7 +601,7 @@ impl NftablesClient {
         })?;
 
         // IMPORTANT: Add DROP rule at the end
-        NftablesTransaction::add_container_drop_rule_to_transaction(
+        RuleSet::add_container_drop_rule_to_transaction(
             self.family,
             &mut transaction,
             container_id,
@@ -630,7 +633,7 @@ impl NftablesClient {
     /// Disable container rules (delete chain) for a transaction
     pub fn disable_container_rules(
         &mut self,
-        transaction: &mut NftablesTransaction,
+        transaction: &mut RuleSet,
         container_id: &str,
         container_name: &str,
     ) -> Result<()> {
