@@ -1,33 +1,44 @@
 # Development Dockerfile
 # Provides a full development environment with pixi and Docker-in-Docker
+# Uses Debian base with Docker installed for glibc compatibility with pixi
 
-FROM docker:dind
+FROM debian:bookworm-slim
 
-# Install system dependencies
-RUN apk add --no-cache \
-    pkgconfig \
-    openssl-dev \
+# Install system dependencies and Docker
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
     ca-certificates \
     nftables \
+    iptables \
     git \
     curl \
-    openssh \
+    openssh-server \
     bash \
-    musl-dev \
-    gcc
+    gcc \
+    gnupg \
+    lsb-release \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Docker
+RUN curl -fsSL https://get.docker.com | sh
 
 # Install pixi for toolchain management
 RUN curl -fsSL https://pixi.sh/install.sh | sh
 ENV PATH="/root/.pixi/bin:${PATH}"
 
-# Install Rust and Docker CLI via pixi
+# Install Rust and Node.js via pixi
 RUN pixi global install rust && \
-    pixi global install docker
+    pixi global install nodejs
+
+# Add pixi to PATH for all shell sessions (SSH, bash, etc.)
+RUN echo 'export PATH="/root/.pixi/bin:$PATH"' >> /root/.bashrc && \
+    echo 'export PATH="/root/.pixi/bin:$PATH"' >> /root/.profile && \
+    echo 'export PATH="/root/.pixi/bin:$PATH"' >> /etc/profile
 
 # Setup SSH for Zed remote development
 RUN mkdir -p /var/run/sshd && \
     echo 'root:dev' | chpasswd && \
-    ssh-keygen -A && \
     sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
     sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
 
@@ -42,7 +53,7 @@ COPY <<'EOF' /start.sh
 set -e
 
 # Start Docker daemon in background
-dockerd-entrypoint.sh dockerd &
+dockerd &
 
 # Wait for Docker to be ready
 echo "Waiting for Docker daemon..."
