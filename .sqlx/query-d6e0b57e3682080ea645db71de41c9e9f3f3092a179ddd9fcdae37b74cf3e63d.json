@@ -6,12 +6,24 @@
       {
         "name": "src_container_id",
         "ordinal": 0,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "waiting_container_rules",
+            "name": "src_container_id"
+          }
+        }
       },
       {
         "name": "dst_container_name",
         "ordinal": 1,
-        "type_info": "Text"
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "waiting_container_rules",
+            "name": "dst_container_name"
+          }
+        }
       }
     ],
     "parameters": {

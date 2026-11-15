@@ -187,7 +187,7 @@ mod tests {
 
     #[test]
     fn test_external_rules_default() {
-        let rules: ExternalRules = serde_yaml::from_str("{}").unwrap();
+        let rules: ExternalRules = serde_saphyr::from_str("{}").unwrap();
         assert!(!rules.allow);
         assert!(rules.log_prefix.is_empty());
         assert!(rules.ips.is_empty());
@@ -195,13 +195,13 @@ mod tests {
 
     #[test]
     fn test_external_rules_allow_true() {
-        let rules: ExternalRules = serde_yaml::from_str("allow: true").unwrap();
+        let rules: ExternalRules = serde_saphyr::from_str("allow: true").unwrap();
         assert!(rules.allow);
     }
 
     #[test]
     fn test_external_rules_log_prefix_valid() {
-        let rules: ExternalRules = serde_yaml::from_str("allow: true\nlog_prefix: 'test-prefix'").unwrap();
+        let rules: ExternalRules = serde_saphyr::from_str("allow: true\nlog_prefix: 'test-prefix'").unwrap();
         assert_eq!(rules.log_prefix, "test-prefix");
     }
 
@@ -209,25 +209,25 @@ mod tests {
     fn test_external_rules_log_prefix_too_long() {
         let long_prefix = "a".repeat(65);
         let yaml = format!("allow: true\nlog_prefix: '{}'", long_prefix);
-        let result: std::result::Result<ExternalRules, _> = serde_yaml::from_str(&yaml);
+        let result: std::result::Result<ExternalRules, _> = serde_saphyr::from_str(&yaml);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_external_rules_with_single_ip() {
-        let rules: ExternalRules = serde_yaml::from_str("allow: true\nips:\n  - 192.168.1.1").unwrap();
+        let rules: ExternalRules = serde_saphyr::from_str("allow: true\nips:\n  - 192.168.1.1").unwrap();
         assert_eq!(rules.ips.len(), 1);
     }
 
     #[test]
     fn test_external_rules_with_multiple_ips() {
-        let rules: ExternalRules = serde_yaml::from_str("allow: true\nips:\n  - 192.168.1.1\n  - 10.0.0.1").unwrap();
+        let rules: ExternalRules = serde_saphyr::from_str("allow: true\nips:\n  - 192.168.1.1\n  - 10.0.0.1").unwrap();
         assert_eq!(rules.ips.len(), 2);
     }
 
     #[test]
     fn test_external_rules_with_cidr() {
-        let rules: ExternalRules = serde_yaml::from_str("allow: true\nips:\n  - 192.168.0.0/24").unwrap();
+        let rules: ExternalRules = serde_saphyr::from_str("allow: true\nips:\n  - 192.168.0.0/24").unwrap();
         assert_eq!(rules.ips.len(), 1);
         assert!(matches!(rules.ips[0], super::super::AddrOrRange::Net(_)));
     }

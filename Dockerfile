@@ -1,42 +1,33 @@
 # Build stage
-FROM rust:slim AS builder
-
-# Install build dependencies
-RUN apt-get update && apt-get install -y \
-    pkg-config \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
+FROM rust:1.99.1-slim-trixie AS builder
 
 WORKDIR /app
 
-# Copy manifest files
 COPY Cargo.toml Cargo.lock ./
-
-# Copy source code
+COPY xtask/Cargo.toml ./xtask/Cargo.toml
+COPY xtask/src ./xtask/src
 COPY src ./src
+COPY migrations ./migrations
+COPY .sqlx ./.sqlx
 
-# Build the application in release mode
-RUN cargo build --release
+# Query macros check against the committed .sqlx cache instead of a live database.
+ENV SQLX_OFFLINE=true
+RUN cargo build --release --bin harborshield
 
 # Runtime stage
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    libssl3 \
     nftables \
     && rm -rf /var/lib/apt/lists/*
 
-# Create a non-root user (but the app needs CAP_NET_ADMIN)
 RUN useradd -m -u 1000 harborshield
 
 WORKDIR /app
 
-# Copy the binary from builder
 COPY --from=builder /app/target/release/harborshield /usr/local/bin/harborshield
 
-# Create data directory
 RUN mkdir -p /data && chown harborshield:harborshield /data
 
 # The application needs CAP_NET_ADMIN to manage nftables

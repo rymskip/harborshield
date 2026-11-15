@@ -243,7 +243,7 @@ output:
       - 5432
 "#;
 
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let config: Config = serde_saphyr::from_str(yaml).unwrap();
         assert!(config.mapped_ports.localhost.allow);
         assert!(!config.mapped_ports.external.allow);
         assert_eq!(config.output.len(), 1);
@@ -261,7 +261,7 @@ mapped_ports:
       - "2001:db8::/32"
 "#;
 
-        let result = serde_yaml::from_str::<Config>(yaml);
+        let result = serde_saphyr::from_str::<Config>(yaml);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("Mixed IPv4 and IPv6"));
@@ -278,7 +278,7 @@ output:
       - "2001:db8::1"
 "#;
 
-        let result = serde_yaml::from_str::<Config>(yaml);
+        let result = serde_saphyr::from_str::<Config>(yaml);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("Mixed IPv4 and IPv6"));
@@ -296,7 +296,7 @@ mapped_ports:
       input_est_queue: 101
 "#;
 
-        let result = serde_yaml::from_str::<Config>(yaml);
+        let result = serde_saphyr::from_str::<Config>(yaml);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("output_est_queue"));
@@ -313,7 +313,7 @@ mapped_ports:
       queue: 100
 "#;
 
-        let result = serde_yaml::from_str::<Config>(yaml);
+        let result = serde_saphyr::from_str::<Config>(yaml);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("mutually exclusive"));
@@ -331,7 +331,7 @@ mapped_ports:
       - "172.16.0.0-172.16.255.255"
 "#;
 
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let config: Config = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.mapped_ports.external.ips.len(), 3);
     }
 
@@ -344,7 +344,7 @@ output:
     ips: ["0.0.0.0/0"]
 "#;
 
-        let result = serde_yaml::from_str::<Config>(yaml);
+        let result = serde_saphyr::from_str::<Config>(yaml);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("0.0.0.0/0"));

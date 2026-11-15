@@ -14,7 +14,7 @@ pub enum Error {
     Database(String),
 
     #[error("YAML parsing error")]
-    Yaml(#[from] serde_yaml::Error),
+    Yaml(#[from] serde_saphyr::Error),
 
     #[error("JSON parsing error")]
     Json(#[from] serde_json::Error),

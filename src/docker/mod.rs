@@ -449,88 +449,6 @@ impl DockerClient {
             .map_err(|e| Error::Docker(e))
     }
 
-    /// Check if the Docker daemon supports a specific API endpoint
-    /// This is useful for gracefully handling newer features
-    pub async fn check_api_endpoint(&self, endpoint: &str) -> bool {
-        // For Unix sockets, we can't use reqwest directly, so fall back to version check
-        if matches!(self.connection_info, ConnectionInfo::Socket(_)) {
-            return self.check_api_endpoint_by_version(endpoint);
-        }
-
-        // Build the full endpoint URL based on the Docker connection
-        let base_url = self.get_docker_base_url();
-        let api_version = self.api_version.as_deref().unwrap_or("v1.41");
-        let full_url = format!("{}/{}{}", base_url, api_version, endpoint);
-
-        // Create an HTTP client based on connection type
-        let client_result = match &self.connection_info {
-            ConnectionInfo::Ssl { .. } => {
-                // For SSL connections, we'd need to configure certificates
-                // For now, fall back to version check
-                return self.check_api_endpoint_by_version(endpoint);
-            }
-            _ => reqwest::Client::builder()
-                .timeout(Duration::from_secs(5))
-                .build(),
-        };
-
-        if let Ok(client) = client_result {
-            // Make a HEAD request to check if the endpoint exists
-            match client.head(&full_url).send().await {
-                Ok(response) => {
-                    // 2xx status codes indicate the endpoint exists
-                    // 404 means it doesn't exist
-                    // Other errors might be auth issues, so we fall back to version check
-                    response.status().is_success()
-                }
-                Err(_) => {
-                    // Fall back to version-based check if HEAD request fails
-                    self.check_api_endpoint_by_version(endpoint)
-                }
-            }
-        } else {
-            // If we can't create the client, fall back to version check
-            self.check_api_endpoint_by_version(endpoint)
-        }
-    }
-
-    /// Get the base URL for the Docker daemon
-    fn get_docker_base_url(&self) -> String {
-        match &self.connection_info {
-            ConnectionInfo::Socket(_) => {
-                // For Unix sockets, Docker uses a special URL format
-                // The actual endpoint will be handled by the HTTP client with socket support
-                "http://localhost".to_string()
-            }
-            ConnectionInfo::Http(url) => url.clone(),
-            ConnectionInfo::Ssl { url, .. } => url.clone(),
-            ConnectionInfo::Default => {
-                // Default Docker daemon URL
-                "http://localhost:2375".to_string()
-            }
-        }
-    }
-
-    /// Check API endpoint support based on version compatibility
-    fn check_api_endpoint_by_version(&self, endpoint: &str) -> bool {
-        if let Some(_api_version) = &self.api_version {
-            // Define minimum versions for various endpoints
-            let endpoint_versions: HashMap<&str, &str> = HashMap::from([
-                ("secrets", "v1.25"),
-                ("configs", "v1.30"),
-                ("plugins", "v1.24"),
-                ("nodes", "v1.24"),
-                ("services", "v1.24"),
-                ("stacks", "v1.25"),
-            ]);
-
-            if let Some(&min_version) = endpoint_versions.get(endpoint) {
-                return self.is_feature_supported(endpoint, min_version).is_ok();
-            }
-        }
-        true // Assume supported if we can't determine
-    }
-
     /// List all Docker networks
     pub async fn list_networks(&self) -> Result<Vec<bollard::models::Network>> {
         use bollard::query_parameters::ListNetworksOptionsBuilder;
@@ -543,21 +461,6 @@ impl DockerClient {
         )
         .await
         .map_err(|_| Error::timeout(self.timeout_duration, "list networks"))?
-        .map_err(|e| Error::Docker(e))
-    }
-
-    /// Inspect a specific Docker network
-    pub async fn inspect_network(&self, network_id: &str) -> Result<bollard::models::Network> {
-        use bollard::query_parameters::InspectNetworkOptionsBuilder;
-
-        let options = InspectNetworkOptionsBuilder::default().build();
-
-        timeout(
-            self.timeout_duration,
-            self.client.inspect_network(network_id, Some(options)),
-        )
-        .await
-        .map_err(|_| Error::timeout(self.timeout_duration, "inspect network"))?
         .map_err(|e| Error::Docker(e))
     }
 

@@ -5,7 +5,7 @@
 
 services:
   harborshield:
-    image: docker:dind
+    image: docker:29-dind
     container_name: harborshield
     restart: unless-stopped
     privileged: true    # Required for Docker-in-Docker and nftables

@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn test_verdict_default() {
-        let verdict: ConfigVerdict = serde_yaml::from_str("{}").unwrap();
+        let verdict: ConfigVerdict = serde_saphyr::from_str("{}").unwrap();
         assert!(verdict.chain.is_empty());
         assert_eq!(verdict.queue, 0);
         assert_eq!(verdict.input_est_queue, 0);
@@ -125,21 +125,21 @@ mod tests {
 
     #[test]
     fn test_verdict_chain_only() {
-        let verdict: ConfigVerdict = serde_yaml::from_str("chain: my-chain").unwrap();
+        let verdict: ConfigVerdict = serde_saphyr::from_str("chain: my-chain").unwrap();
         assert_eq!(verdict.chain, "my-chain");
         assert_eq!(verdict.queue, 0);
     }
 
     #[test]
     fn test_verdict_queue_only() {
-        let verdict: ConfigVerdict = serde_yaml::from_str("queue: 100").unwrap();
+        let verdict: ConfigVerdict = serde_saphyr::from_str("queue: 100").unwrap();
         assert!(verdict.chain.is_empty());
         assert_eq!(verdict.queue, 100);
     }
 
     #[test]
     fn test_verdict_chain_and_queue_exclusive() {
-        let result: Result<ConfigVerdict, _> = serde_yaml::from_str("chain: test\nqueue: 100");
+        let result: Result<ConfigVerdict, _> = serde_saphyr::from_str("chain: test\nqueue: 100");
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("mutually exclusive"));
@@ -147,26 +147,26 @@ mod tests {
 
     #[test]
     fn test_verdict_input_est_requires_queue() {
-        let result: Result<ConfigVerdict, _> = serde_yaml::from_str("input_est_queue: 200");
+        let result: Result<ConfigVerdict, _> = serde_saphyr::from_str("input_est_queue: 200");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_verdict_output_est_requires_queue() {
-        let result: Result<ConfigVerdict, _> = serde_yaml::from_str("output_est_queue: 200");
+        let result: Result<ConfigVerdict, _> = serde_saphyr::from_str("output_est_queue: 200");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_verdict_symmetric_est_queues_both_required() {
         // Only input_est_queue without output_est_queue should fail
-        let result: Result<ConfigVerdict, _> = serde_yaml::from_str("queue: 100\ninput_est_queue: 200");
+        let result: Result<ConfigVerdict, _> = serde_saphyr::from_str("queue: 100\ninput_est_queue: 200");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_verdict_full_queue_config() {
-        let verdict: ConfigVerdict = serde_yaml::from_str("queue: 100\ninput_est_queue: 200\noutput_est_queue: 300").unwrap();
+        let verdict: ConfigVerdict = serde_saphyr::from_str("queue: 100\ninput_est_queue: 200\noutput_est_queue: 300").unwrap();
         assert_eq!(verdict.queue, 100);
         assert_eq!(verdict.input_est_queue, 200);
         assert_eq!(verdict.output_est_queue, 300);

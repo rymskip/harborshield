@@ -1,12 +1,11 @@
 # Development Dockerfile
 # Provides a full development environment with pixi and Docker-in-Docker
 
-FROM docker:dind
+FROM docker:29-dind
 
 # Install system dependencies
 RUN apk add --no-cache \
     pkgconfig \
-    openssl-dev \
     ca-certificates \
     nftables \
     git \

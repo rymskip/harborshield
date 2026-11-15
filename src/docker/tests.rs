@@ -27,7 +27,7 @@ mod tests {
                     "harborshield.enabled".to_string(),
                     "true".to_string(),
                 )])),
-                exposed_ports: Some(HashMap::from([("80/tcp".to_string(), HashMap::new())])),
+                exposed_ports: Some(vec!["80/tcp".to_string()]),
                 ..Default::default()
             }),
             network_settings: Some(NetworkSettings {
@@ -175,11 +175,11 @@ mod tests {
         let mut inspect = create_test_inspect_response("test", "test");
 
         if let Some(ref mut config) = inspect.config {
-            config.exposed_ports = Some(HashMap::from([
-                ("80/tcp".to_string(), HashMap::new()),
-                ("443/tcp".to_string(), HashMap::new()),
-                ("8080/udp".to_string(), HashMap::new()),
-            ]));
+            config.exposed_ports = Some(vec![
+                "80/tcp".to_string(),
+                "443/tcp".to_string(),
+                "8080/udp".to_string(),
+            ]);
         }
 
         let info = Container::from_inspect(inspect).unwrap();
@@ -483,41 +483,6 @@ mod tests {
 
         let info = Container::from_inspect(inspect).unwrap();
         assert!(!info.uses_host_network);
-    }
-
-    #[tokio::test]
-    async fn test_check_api_endpoint() {
-        init_test();
-        // Test that check_api_endpoint falls back to version check
-        let result = DockerClient::builder().build();
-        if let Ok(client) = result {
-            // Test known endpoints
-            let endpoints = vec![
-                ("/containers/json", true),
-                ("/images/json", true),
-                ("/secrets", true), // May be false if old Docker version
-                ("/unknown/endpoint", false),
-            ];
-
-            for (endpoint, _expected) in endpoints {
-                // Just verify it doesn't panic and returns a boolean
-                let _ = client.check_api_endpoint(endpoint).await;
-            }
-        }
-    }
-
-    #[test]
-    fn test_check_api_endpoint_by_version() {
-        init_test();
-        let result = DockerClient::builder().build();
-        if let Ok(client) = result {
-            // These tests use the fallback version check
-            assert!(client.check_api_endpoint_by_version("/containers/json"));
-            assert!(client.check_api_endpoint_by_version("/images/json"));
-
-            // Without a known API version, it returns true for unknown endpoints
-            assert!(client.check_api_endpoint_by_version("/unknown/endpoint"));
-        }
     }
 
     #[tokio::test]

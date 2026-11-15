@@ -348,7 +348,7 @@ impl Container {
         let mut ports = Vec::new();
         if let Some(config) = inspect.config {
             if let Some(exposed_ports) = config.exposed_ports {
-                for (port_proto, _) in exposed_ports {
+                for port_proto in exposed_ports {
                     let parts: Vec<&str> = port_proto.split('/').collect();
                     if parts.len() == 2 {
                         if let Ok(port_num) = parts[0].parse::<u16>() {
@@ -446,7 +446,7 @@ impl Container {
 
         // Parse and validate config during container creation
         let config = if let Some(rules_yaml) = labels.get(RULES_LABEL) {
-            match serde_yaml::from_str::<Config>(rules_yaml) {
+            match serde_saphyr::from_str::<Config>(rules_yaml) {
                 Ok(config) => Some(config),
                 Err(e) => {
                     warn!(

@@ -402,14 +402,14 @@ dst_ports:
 ips:
   - 192.168.1.1
 "#;
-        let result: std::result::Result<RuleConfig, _> = serde_yaml::from_str(yaml);
+        let result: std::result::Result<RuleConfig, _> = serde_saphyr::from_str(yaml);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_rule_config_empty_rule() {
         let yaml = "proto: tcp";
-        let result: std::result::Result<RuleConfig, _> = serde_yaml::from_str(yaml);
+        let result: std::result::Result<RuleConfig, _> = serde_saphyr::from_str(yaml);
         assert!(result.is_err());
     }
 
@@ -424,7 +424,7 @@ ips:
 container: my-container
 network: default
 "#;
-        let result: std::result::Result<RuleConfig, _> = serde_yaml::from_str(yaml);
+        let result: std::result::Result<RuleConfig, _> = serde_saphyr::from_str(yaml);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("mutually exclusive"));
@@ -438,7 +438,7 @@ dst_ports:
   - 80
 container: my-container
 "#;
-        let result: std::result::Result<RuleConfig, _> = serde_yaml::from_str(yaml);
+        let result: std::result::Result<RuleConfig, _> = serde_saphyr::from_str(yaml);
         assert!(result.is_err());
     }
 
@@ -451,7 +451,7 @@ src_ports:
 ips:
   - 192.168.1.1
 "#;
-        let result: std::result::Result<RuleConfig, _> = serde_yaml::from_str(yaml);
+        let result: std::result::Result<RuleConfig, _> = serde_saphyr::from_str(yaml);
         assert!(result.is_err());
     }
 
@@ -464,7 +464,7 @@ dst_ports:
 ips:
   - 192.168.1.1
 "#;
-        let result: std::result::Result<RuleConfig, _> = serde_yaml::from_str(yaml);
+        let result: std::result::Result<RuleConfig, _> = serde_saphyr::from_str(yaml);
         assert!(result.is_err());
     }
 
@@ -477,7 +477,7 @@ dst_ports:
 ips:
   - 192.168.1.1
 "#;
-        let result: std::result::Result<RuleConfig, _> = serde_yaml::from_str(yaml);
+        let result: std::result::Result<RuleConfig, _> = serde_saphyr::from_str(yaml);
         assert!(result.is_err());
     }
 
@@ -492,7 +492,7 @@ ips:
   - 192.168.1.1
 log_prefix: '{}'
 "#, long_prefix);
-        let result: std::result::Result<RuleConfig, _> = serde_yaml::from_str(&yaml);
+        let result: std::result::Result<RuleConfig, _> = serde_saphyr::from_str(&yaml);
         assert!(result.is_err());
     }
 
@@ -505,7 +505,7 @@ dst_ports:
 container: my-container
 network: default
 "#;
-        let result: std::result::Result<RuleConfig, _> = serde_yaml::from_str(yaml);
+        let result: std::result::Result<RuleConfig, _> = serde_saphyr::from_str(yaml);
         assert!(result.is_ok());
     }
 

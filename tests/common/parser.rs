@@ -36,14 +36,14 @@ impl ComposeParser {
     pub fn extract_verdict_chains(
         yaml: &str,
     ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-        let compose: Compose = serde_yaml::from_str(yaml)?;
+        let compose: Compose = serde_saphyr::from_str(yaml)?;
         let mut verdict_chains = std::collections::HashSet::new();
 
         // Extract verdict chains from all services
         for (_, service) in compose.services.iter() {
             if Self::has_harborshield_enabled(service) {
                 if let Some(rules_yaml) = Self::get_harborshield_rules(service) {
-                    if let Ok(rules_value) = serde_yaml::from_str::<serde_yaml::Value>(rules_yaml) {
+                    if let Ok(rules_value) = serde_saphyr::from_str::<serde_json::Value>(rules_yaml) {
                         // Check mapped_ports for verdict chains
                         if let Some(mapped_ports) = rules_value.get("mapped_ports") {
                             // Check localhost rules
@@ -75,7 +75,7 @@ impl ComposeParser {
 
                         // Check output rules
                         if let Some(outputs) =
-                            rules_value.get("output").and_then(|o| o.as_sequence())
+                            rules_value.get("output").and_then(|o| o.as_array())
                         {
                             for output in outputs {
                                 if let Some(verdict) = output.get("verdict") {
@@ -122,7 +122,7 @@ impl ComposeParser {
         let mut cross_network_rules = Vec::new();
 
         if let Some(rules_yaml) = Self::get_harborshield_rules(service) {
-            if let Ok(config) = serde_yaml::from_str::<Config>(rules_yaml) {
+            if let Ok(config) = serde_saphyr::from_str::<Config>(rules_yaml) {
                 for rule in &config.output {
                     if !rule.network.is_empty() && !rule.container.is_empty() {
                         cross_network_rules.push((
@@ -143,7 +143,7 @@ impl ComposeParser {
         yaml: &str,
     ) -> Result<Vec<NamedAssertion>, Box<dyn std::error::Error + Send + Sync>> {
         eprintln!("🔍 Parsing compose YAML to generate test assertions...");
-        let compose: Compose = serde_yaml::from_str(yaml)?;
+        let compose: Compose = serde_saphyr::from_str(yaml)?;
         let mut assertions = Vec::new();
 
         // Extract information from the compose file
@@ -232,7 +232,7 @@ impl ComposeParser {
 
         eprintln!("🔍 Analyzing service rules...");
         for (service_name, service) in &services {
-            // Negative-path assertions are independent of harborshield.enabled —
+            // Negative-path assertions are independent of harborshield.enabled:
             // any service can declare what it expects to be blocked.
             for (target, port) in Self::get_expect_blocked(service) {
                 eprintln!(
@@ -247,7 +247,7 @@ impl ComposeParser {
                 // Check for port rules
                 if let Some(rules_yaml) = Self::get_harborshield_rules(service) {
                     // First, validate the rules by parsing them as Config
-                    match serde_yaml::from_str::<Config>(rules_yaml) {
+                    match serde_saphyr::from_str::<Config>(rules_yaml) {
                         Ok(_config) => {
                             // Rules are valid, continue with extraction
                         }
@@ -265,7 +265,7 @@ impl ComposeParser {
                     }
 
                     // Parse the rules YAML to extract detailed configuration
-                    if let Ok(rules_value) = serde_yaml::from_str::<serde_yaml::Value>(rules_yaml) {
+                    if let Ok(rules_value) = serde_saphyr::from_str::<serde_json::Value>(rules_yaml) {
                         // Check mapped_ports rules
                         if let Some(mapped_ports) = rules_value.get("mapped_ports") {
                             let localhost_allowed = mapped_ports
@@ -303,12 +303,12 @@ impl ComposeParser {
 
                         // Extract OUTPUT rules for connections
                         if let Some(outputs) =
-                            rules_value.get("output").and_then(|o| o.as_sequence())
+                            rules_value.get("output").and_then(|o| o.as_array())
                         {
                             for output in outputs {
                                 if let (Some(target), Some(ports)) = (
                                     output.get("container").and_then(|c| c.as_str()),
-                                    output.get("dst_ports").and_then(|p| p.as_sequence()),
+                                    output.get("dst_ports").and_then(|p| p.as_array()),
                                 ) {
                                     if let Some(port) = ports.first().and_then(|p| p.as_u64()) {
                                         eprintln!(
@@ -379,7 +379,7 @@ impl ComposeParser {
             if Self::has_harborshield_enabled(service) {
                 if let Some(rules_yaml) = Self::get_harborshield_rules(service) {
                     // Validate rules first
-                    match serde_yaml::from_str::<Config>(rules_yaml) {
+                    match serde_saphyr::from_str::<Config>(rules_yaml) {
                         Ok(_) => {
                             // Rules are valid
                         }
@@ -393,7 +393,7 @@ impl ComposeParser {
                         }
                     }
 
-                    if let Ok(rules_value) = serde_yaml::from_str::<serde_yaml::Value>(rules_yaml) {
+                    if let Ok(rules_value) = serde_saphyr::from_str::<serde_json::Value>(rules_yaml) {
                         let mut log_prefixes = Vec::new();
                         let mut verdict_chains = Vec::new();
                         let mut nfqueues = Vec::new();
@@ -441,7 +441,7 @@ impl ComposeParser {
                                         .push(("container".to_string(), log_prefix.to_string()));
                                 }
 
-                                if let Some(ips) = external.get("ips").and_then(|i| i.as_sequence())
+                                if let Some(ips) = external.get("ips").and_then(|i| i.as_array())
                                 {
                                     let ip_list: Vec<String> = ips
                                         .iter()
@@ -474,7 +474,7 @@ impl ComposeParser {
 
                         // Check output rules for advanced features
                         if let Some(outputs) =
-                            rules_value.get("output").and_then(|o| o.as_sequence())
+                            rules_value.get("output").and_then(|o| o.as_array())
                         {
                             for output in outputs {
                                 if let Some(log_prefix) = output

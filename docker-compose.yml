@@ -4,7 +4,7 @@
 
 services:
   harborshield:
-    image: debian:bookworm-slim
+    image: debian:trixie-slim
     container_name: harborshield
     restart: unless-stopped
     network_mode: host # Required to manage host nftables
@@ -36,7 +36,7 @@ services:
       - -c
       - |
         # Update package lists and install dependencies
-        apt-get update -qq && apt-get install -y --no-install-recommends ca-certificates libssl3 nftables > /dev/null 2>&1
+        apt-get update -qq && apt-get install -y --no-install-recommends ca-certificates nftables > /dev/null 2>&1
         
         # Create data directory if it doesn't exist
         mkdir -p /data

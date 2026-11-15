@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn test_local_rules_default() {
-        let rules: LocalRules = serde_yaml::from_str("{}").unwrap();
+        let rules: LocalRules = serde_saphyr::from_str("{}").unwrap();
         assert!(!rules.allow);
         assert!(rules.log_prefix.is_empty());
         assert!(rules.include_gateway_ips);
@@ -112,13 +112,13 @@ mod tests {
 
     #[test]
     fn test_local_rules_allow_true() {
-        let rules: LocalRules = serde_yaml::from_str("allow: true").unwrap();
+        let rules: LocalRules = serde_saphyr::from_str("allow: true").unwrap();
         assert!(rules.allow);
     }
 
     #[test]
     fn test_local_rules_log_prefix_valid() {
-        let rules: LocalRules = serde_yaml::from_str("allow: true\nlog_prefix: 'test-prefix'").unwrap();
+        let rules: LocalRules = serde_saphyr::from_str("allow: true\nlog_prefix: 'test-prefix'").unwrap();
         assert_eq!(rules.log_prefix, "test-prefix");
     }
 
@@ -126,19 +126,19 @@ mod tests {
     fn test_local_rules_log_prefix_too_long() {
         let long_prefix = "a".repeat(65);
         let yaml = format!("allow: true\nlog_prefix: '{}'", long_prefix);
-        let result: std::result::Result<LocalRules, _> = serde_yaml::from_str(&yaml);
+        let result: std::result::Result<LocalRules, _> = serde_saphyr::from_str(&yaml);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_local_rules_include_gateway_ips_false() {
-        let rules: LocalRules = serde_yaml::from_str("include_gateway_ips: false").unwrap();
+        let rules: LocalRules = serde_saphyr::from_str("include_gateway_ips: false").unwrap();
         assert!(!rules.include_gateway_ips);
     }
 
     #[test]
     fn test_local_rules_enable_nat_false() {
-        let rules: LocalRules = serde_yaml::from_str("enable_nat: false").unwrap();
+        let rules: LocalRules = serde_saphyr::from_str("enable_nat: false").unwrap();
         assert!(!rules.enable_nat);
     }
 
