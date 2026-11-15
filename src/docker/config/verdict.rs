@@ -15,10 +15,6 @@ pub struct ConfigVerdict {
     #[serde(default)]
     #[builder(default)]
     pub output_est_queue: u16,
-
-    #[serde(skip)]
-    #[builder(default = false)]
-    pub drop: bool,
 }
 // Custom Deserialize for ConfigVerdict with validation
 impl<'de> Deserialize<'de> for ConfigVerdict {
@@ -27,6 +23,7 @@ impl<'de> Deserialize<'de> for ConfigVerdict {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct TempConfigVerdict {
             #[serde(default)]
             chain: String,
@@ -36,8 +33,6 @@ impl<'de> Deserialize<'de> for ConfigVerdict {
             input_est_queue: u16,
             #[serde(default)]
             output_est_queue: u16,
-            #[serde(skip)]
-            drop: bool,
         }
 
         let temp = TempConfigVerdict::deserialize(deserializer)?;
@@ -105,14 +100,13 @@ impl<'de> Deserialize<'de> for ConfigVerdict {
             queue: temp.queue,
             input_est_queue: temp.input_est_queue,
             output_est_queue: temp.output_est_queue,
-            drop: temp.drop,
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::ConfigVerdict;
 
     #[test]
     fn test_verdict_default() {
@@ -160,13 +154,16 @@ mod tests {
     #[test]
     fn test_verdict_symmetric_est_queues_both_required() {
         // Only input_est_queue without output_est_queue should fail
-        let result: Result<ConfigVerdict, _> = serde_saphyr::from_str("queue: 100\ninput_est_queue: 200");
+        let result: Result<ConfigVerdict, _> =
+            serde_saphyr::from_str("queue: 100\ninput_est_queue: 200");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_verdict_full_queue_config() {
-        let verdict: ConfigVerdict = serde_saphyr::from_str("queue: 100\ninput_est_queue: 200\noutput_est_queue: 300").unwrap();
+        let verdict: ConfigVerdict =
+            serde_saphyr::from_str("queue: 100\ninput_est_queue: 200\noutput_est_queue: 300")
+                .unwrap();
         assert_eq!(verdict.queue, 100);
         assert_eq!(verdict.input_est_queue, 200);
         assert_eq!(verdict.output_est_queue, 300);

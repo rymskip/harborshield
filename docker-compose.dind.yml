@@ -26,7 +26,6 @@ services:
 
       # Docker configuration
       DOCKER_HOST: ${DOCKER_HOST:-unix:///var/run/docker.sock}
-      DOCKER_API_VERSION: ${DOCKER_API_VERSION:-}
       
       # Disable Docker-in-Docker daemon since we're using host socket
       DOCKER_TLS_CERTDIR: ""

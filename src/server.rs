@@ -1,8 +1,7 @@
-//! HTTP health/metrics server.
+//! HTTP health and metrics server.
 //!
-//! Exposes `/health`, `/ready`, `/metrics`, `/version`, `/status` over HTTP/1.1
-//! using axum. Metrics setup and the small counter/gauge helpers below are
-//! unrelated to the HTTP layer and used from across the crate.
+//! Exposes `/health`, `/ready`, `/metrics`, `/version` and `/status` over HTTP/1.1 using
+//! axum. The metric helpers at the bottom are used from across the crate.
 
 use axum::{
     Json, Router,
@@ -14,16 +13,34 @@ use axum::{
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use serde_json::json;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::Result;
+
+/// Whether the firewall currently reflects Docker's state: false until the first reconcile
+/// is applied, and while the event stream is being re-established.
+#[derive(Clone, Debug, Default)]
+pub struct Readiness(Arc<AtomicBool>);
+
+impl Readiness {
+    pub fn set(&self, ready: bool) {
+        self.0.store(ready, Ordering::Release);
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
 
 #[derive(Clone)]
 struct HealthState {
     prometheus_handle: PrometheusHandle,
     start_time: chrono::DateTime<chrono::Utc>,
     version: String,
+    readiness: Readiness,
 }
 
 pub struct HealthServer {
@@ -36,9 +53,13 @@ impl HealthServer {
         bind_addr: &str,
         prometheus_handle: PrometheusHandle,
         version: String,
+        readiness: Readiness,
     ) -> Result<Self> {
         let listener = TcpListener::bind(bind_addr).await?;
-        info!("Health check server will bind to {}", listener.local_addr()?);
+        info!(
+            "Health check server will bind to {}",
+            listener.local_addr()?
+        );
 
         Ok(Self {
             listener,
@@ -46,11 +67,13 @@ impl HealthServer {
                 prometheus_handle,
                 start_time: chrono::Utc::now(),
                 version,
+                readiness,
             },
         })
     }
 
-    pub async fn serve(self) -> Result<()> {
+    /// Serve until `shutdown` is cancelled.
+    pub async fn serve(self, shutdown: CancellationToken) -> Result<()> {
         info!(
             "Starting health check server on {}",
             self.listener.local_addr()?
@@ -64,7 +87,9 @@ impl HealthServer {
             .route("/status", get(status))
             .with_state(Arc::new(self.state));
 
-        axum::serve(self.listener, router).await?;
+        axum::serve(self.listener, router)
+            .with_graceful_shutdown(shutdown.cancelled_owned())
+            .await?;
         Ok(())
     }
 
@@ -80,12 +105,19 @@ async fn health() -> Json<serde_json::Value> {
     }))
 }
 
-async fn ready(State(state): State<Arc<HealthState>>) -> Json<serde_json::Value> {
-    Json(json!({
-        "status": "ready",
+async fn ready(State(state): State<Arc<HealthState>>) -> Response {
+    let ready = state.readiness.is_ready();
+    let status = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    let body = Json(json!({
+        "status": if ready { "ready" } else { "starting" },
         "timestamp": chrono::Utc::now().to_rfc3339(),
-        "uptime_seconds": (chrono::Utc::now() - state.start_time).num_seconds(),
-    }))
+        "uptime_seconds": chrono::Utc::now().signed_duration_since(state.start_time).num_seconds(),
+    }));
+    (status, body).into_response()
 }
 
 async fn metrics(State(state): State<Arc<HealthState>>) -> Response {
@@ -108,7 +140,7 @@ async fn version(State(state): State<Arc<HealthState>>) -> Json<serde_json::Valu
 }
 
 async fn status(State(state): State<Arc<HealthState>>) -> Json<serde_json::Value> {
-    let uptime = chrono::Utc::now() - state.start_time;
+    let uptime = chrono::Utc::now().signed_duration_since(state.start_time);
     Json(json!({
         "status": "running",
         "version": state.version,
@@ -121,15 +153,11 @@ async fn status(State(state): State<Arc<HealthState>>) -> Json<serde_json::Value
 pub fn setup_metrics() -> Result<PrometheusHandle> {
     let handle = PrometheusBuilder::new()
         .install_recorder()
-        .map_err(|e| crate::Error::metrics(format!("Failed to setup metrics: {}", e)))?;
+        .map_err(|error| crate::Error::Metrics(error.to_string()))?;
 
     metrics::describe_counter!(
-        "harborshield_rules_applied_total",
-        "Total number of firewall rules applied"
-    );
-    metrics::describe_counter!(
-        "harborshield_containers_tracked_total",
-        "Total number of containers being tracked"
+        "harborshield_reconciles_total",
+        "Total number of firewall reconciles applied"
     );
     metrics::describe_counter!(
         "harborshield_errors_total",
@@ -137,222 +165,165 @@ pub fn setup_metrics() -> Result<PrometheusHandle> {
     );
     metrics::describe_gauge!(
         "harborshield_active_containers",
-        "Number of currently active containers"
-    );
-    metrics::describe_gauge!(
-        "harborshield_active_rules",
-        "Number of currently active firewall rules"
-    );
-    metrics::describe_histogram!(
-        "harborshield_rule_apply_duration_seconds",
-        "Time taken to apply firewall rules"
+        "Number of containers under management"
     );
 
     Ok(handle)
 }
 
 pub fn increment_rules_applied() {
-    metrics::counter!("harborshield_rules_applied_total").increment(1);
-}
-
-pub fn increment_containers_tracked() {
-    metrics::counter!("harborshield_containers_tracked_total").increment(1);
+    metrics::counter!("harborshield_reconciles_total").increment(1);
 }
 
 pub fn increment_errors() {
     metrics::counter!("harborshield_errors_total").increment(1);
 }
 
-pub fn set_active_containers(count: u64) {
-    metrics::gauge!("harborshield_active_containers").set(count as f64);
-}
-
-pub fn set_active_rules(count: u64) {
-    metrics::gauge!("harborshield_active_rules").set(count as f64);
-}
-
-pub fn record_rule_apply_duration(duration: std::time::Duration) {
-    metrics::histogram!("harborshield_rule_apply_duration_seconds").record(duration.as_secs_f64());
+pub fn set_active_containers(count: usize) {
+    // A gauge is an f64; any realistic container count fits a u32 exactly.
+    let count = u32::try_from(count).unwrap_or(u32::MAX);
+    metrics::gauge!("harborshield_active_containers").set(count);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::Duration;
 
-    // Note: These tests verify the metric helper functions don't panic.
-    // The actual metric recording depends on the metrics recorder being installed.
+    use metrics_exporter_prometheus::PrometheusBuilder;
+    use tokio_util::sync::CancellationToken;
+
+    use super::{
+        HealthServer, Readiness, increment_errors, increment_rules_applied, set_active_containers,
+    };
 
     #[test]
-    fn test_increment_rules_applied_no_panic() {
-        // This should not panic even without a metrics recorder
+    fn metric_helpers_work_without_a_recorder() {
         increment_rules_applied();
-    }
-
-    #[test]
-    fn test_increment_containers_tracked_no_panic() {
-        // This should not panic even without a metrics recorder
-        increment_containers_tracked();
-    }
-
-    #[test]
-    fn test_increment_errors_no_panic() {
-        // This should not panic even without a metrics recorder
         increment_errors();
-    }
-
-    #[test]
-    fn test_set_active_containers_no_panic() {
-        // This should not panic even without a metrics recorder
         set_active_containers(0);
-        set_active_containers(5);
-        set_active_containers(100);
+        set_active_containers(usize::MAX);
     }
 
-    #[test]
-    fn test_set_active_rules_no_panic() {
-        // This should not panic even without a metrics recorder
-        set_active_rules(0);
-        set_active_rules(10);
-        set_active_rules(1000);
-    }
-
-    #[test]
-    fn test_record_rule_apply_duration_no_panic() {
-        // This should not panic even without a metrics recorder
-        record_rule_apply_duration(Duration::from_secs(0));
-        record_rule_apply_duration(Duration::from_millis(100));
-        record_rule_apply_duration(Duration::from_secs(1));
-    }
-
-    #[test]
-    fn test_record_rule_apply_duration_subsecond() {
-        // Verify subsecond durations are handled correctly
-        let duration = Duration::from_millis(500);
-        assert_eq!(duration.as_secs_f64(), 0.5);
-        record_rule_apply_duration(duration);
-    }
-
-    #[test]
-    fn test_record_rule_apply_duration_large_value() {
-        // Verify large durations are handled correctly
-        let duration = Duration::from_secs(3600); // 1 hour
-        assert_eq!(duration.as_secs_f64(), 3600.0);
-        record_rule_apply_duration(duration);
-    }
-
-    /// Spin the server on port 0 in a background task and return the bound URL
-    /// plus a JoinHandle that can be aborted to stop the server.
-    async fn spawn_server() -> (String, tokio::task::JoinHandle<Result<()>>) {
-        // Each test gets its own recorder without binding any listener.
-        // install_recorder() is global state and would clash across parallel
-        // tests; build() also installs an exporter on a default port.
-        let recorder = PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-
-        let server = HealthServer::new("127.0.0.1:0", handle, "test-version".into())
+    /// Serve on port 0 in a background task; cancel the token to stop it.
+    async fn spawn_server(readiness: Readiness) -> (String, CancellationToken) {
+        // install_recorder() is global and would clash across parallel tests.
+        let handle = PrometheusBuilder::new().build_recorder().handle();
+        let server = HealthServer::new("127.0.0.1:0", handle, "test-version".into(), readiness)
             .await
-            .unwrap();
-        let addr = server.local_addr().unwrap();
-        let url = format!("http://{}", addr);
-
-        let join = tokio::spawn(server.serve());
-        // Brief settle so the listener is in accept loop before reqwest hits it.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        (url, join)
+            .expect("bind health server");
+        let url = format!("http://{}", server.local_addr().expect("bound address"));
+        let shutdown = CancellationToken::new();
+        tokio::spawn(server.serve(shutdown.clone()));
+        (url, shutdown)
     }
 
     fn http() -> reqwest::Client {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
             .build()
-            .unwrap()
+            .expect("HTTP client")
+    }
+
+    async fn get_json(url: &str) -> (u16, serde_json::Value) {
+        let response = http().get(url).send().await.expect("request");
+        let status = response.status().as_u16();
+        (status, response.json().await.expect("JSON body"))
     }
 
     #[tokio::test]
     async fn health_endpoint_returns_healthy_json() {
-        let (url, srv) = spawn_server().await;
-        let resp = http().get(format!("{}/health", url)).send().await.unwrap();
-        assert_eq!(resp.status(), 200);
-        assert_eq!(
-            resp.headers()
-                .get("content-type")
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "application/json"
-        );
-        let body: serde_json::Value = resp.json().await.unwrap();
+        let (url, shutdown) = spawn_server(Readiness::default()).await;
+        let (status, body) = get_json(&format!("{url}/health")).await;
+        assert_eq!(status, 200);
         assert_eq!(body["status"], "healthy");
         assert!(body["timestamp"].is_string());
-        srv.abort();
+        shutdown.cancel();
     }
 
     #[tokio::test]
-    async fn ready_endpoint_includes_uptime() {
-        let (url, srv) = spawn_server().await;
-        let resp = http().get(format!("{}/ready", url)).send().await.unwrap();
-        let body: serde_json::Value = resp.json().await.unwrap();
+    async fn ready_endpoint_follows_readiness() {
+        let readiness = Readiness::default();
+        let (url, shutdown) = spawn_server(readiness.clone()).await;
+
+        let (status, body) = get_json(&format!("{url}/ready")).await;
+        assert_eq!(status, 503);
+        assert_eq!(body["status"], "starting");
+
+        readiness.set(true);
+        let (status, body) = get_json(&format!("{url}/ready")).await;
+        assert_eq!(status, 200);
         assert_eq!(body["status"], "ready");
         assert!(body["uptime_seconds"].as_i64().is_some());
-        srv.abort();
+
+        readiness.set(false);
+        let (status, _) = get_json(&format!("{url}/ready")).await;
+        assert_eq!(status, 503);
+        shutdown.cancel();
     }
 
     #[tokio::test]
     async fn metrics_endpoint_serves_prometheus_text() {
-        let (url, srv) = spawn_server().await;
-        let resp = http()
-            .get(format!("{}/metrics", url))
+        let (url, shutdown) = spawn_server(Readiness::default()).await;
+        let response = http()
+            .get(format!("{url}/metrics"))
             .send()
             .await
-            .unwrap();
-        assert_eq!(resp.status(), 200);
+            .expect("request");
+        assert_eq!(response.status(), 200);
         assert_eq!(
-            resp.headers()
+            response
+                .headers()
                 .get("content-type")
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "text/plain; version=0.0.4"
+                .map(|value| value.as_bytes()),
+            Some(&b"text/plain; version=0.0.4"[..])
         );
-        // Body is prometheus text exposition; should at least be a valid utf-8
-        // string. Empty is acceptable when no metrics have been recorded.
-        let body = resp.text().await.unwrap();
-        let _ = body;
-        srv.abort();
+        shutdown.cancel();
     }
 
     #[tokio::test]
     async fn version_endpoint_echoes_configured_version() {
-        let (url, srv) = spawn_server().await;
-        let resp = http()
-            .get(format!("{}/version", url))
-            .send()
-            .await
-            .unwrap();
-        let body: serde_json::Value = resp.json().await.unwrap();
+        let (url, shutdown) = spawn_server(Readiness::default()).await;
+        let (_, body) = get_json(&format!("{url}/version")).await;
         assert_eq!(body["version"], "test-version");
-        // build-time/git/rust default to "unknown" without env vars.
         assert!(body["build_time"].is_string());
-        srv.abort();
+        shutdown.cancel();
     }
 
     #[tokio::test]
     async fn status_endpoint_returns_running_with_start_time() {
-        let (url, srv) = spawn_server().await;
-        let resp = http().get(format!("{}/status", url)).send().await.unwrap();
-        let body: serde_json::Value = resp.json().await.unwrap();
+        let (url, shutdown) = spawn_server(Readiness::default()).await;
+        let (_, body) = get_json(&format!("{url}/status")).await;
         assert_eq!(body["status"], "running");
         assert_eq!(body["version"], "test-version");
         assert!(body["start_time"].is_string());
-        srv.abort();
+        shutdown.cancel();
     }
 
     #[tokio::test]
     async fn unknown_path_returns_404() {
-        let (url, srv) = spawn_server().await;
-        let resp = http().get(format!("{}/nope", url)).send().await.unwrap();
-        assert_eq!(resp.status(), 404);
-        srv.abort();
+        let (url, shutdown) = spawn_server(Readiness::default()).await;
+        let response = http()
+            .get(format!("{url}/nope"))
+            .send()
+            .await
+            .expect("request");
+        assert_eq!(response.status(), 404);
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn cancelling_shuts_the_server_down() {
+        let handle = PrometheusBuilder::new().build_recorder().handle();
+        let server = HealthServer::new("127.0.0.1:0", handle, "v".into(), Readiness::default())
+            .await
+            .expect("bind health server");
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn(server.serve(shutdown.clone()));
+        shutdown.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("server stops promptly")
+            .expect("server task joins");
+        assert!(result.is_ok());
     }
 }

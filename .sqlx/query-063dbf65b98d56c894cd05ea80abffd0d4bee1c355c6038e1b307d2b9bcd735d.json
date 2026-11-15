@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM containers WHERE name = ? AND id != ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "063dbf65b98d56c894cd05ea80abffd0d4bee1c355c6038e1b307d2b9bcd735d"
+}

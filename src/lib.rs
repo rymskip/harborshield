@@ -10,489 +10,203 @@ pub mod server;
 use crate::{
     database::DB,
     docker::DockerClient,
-    handlers::cleanup::CleanupTracker,
-    nftables::{FILTER_TABLE, NftablesClient},
+    nftables::{kernel, plan},
+    server::Readiness,
 };
 use bon::bon;
 pub use error::{Error, Result};
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
+use std::sync::{Arc, Mutex as StdMutex, PoisonError};
 use std::time::Duration;
 use tokio::signal;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 pub const ENABLED_LABEL: &str = "harborshield.enabled";
 pub const RULES_LABEL: &str = "harborshield.rules";
 
+/// How long `stop` waits for each background task to finish.
+const TASK_STOP_LIMIT: Duration = Duration::from_secs(30);
+
+/// The daemon: tracks Docker's containers and keeps harborshield's firewall table in step.
 #[derive(Clone)]
 pub struct Harborshield {
     docker_client: Arc<DockerClient>,
-    nftables_client: Arc<Mutex<NftablesClient>>,
     db: Arc<DB>,
-    shutdown_tx: mpsc::Sender<()>,
-    shutdown_rx: Arc<Mutex<mpsc::Receiver<()>>>,
-    task_handles: Arc<StdMutex<Vec<JoinHandle<()>>>>,
-    health_server_handle: Arc<Option<JoinHandle<()>>>,
-    start_time: chrono::DateTime<chrono::Utc>,
-    cleanup_tracker: Arc<CleanupTracker>,
-    cancellation_token: CancellationToken,
+    /// Serialises reconciles so two never interleave their read and apply.
+    firewall: Arc<Mutex<()>>,
+    readiness: Readiness,
+    cancellation: CancellationToken,
+    tasks: Arc<StdMutex<Vec<JoinHandle<()>>>>,
 }
 
 #[bon]
 impl Harborshield {
+    /// Connect to Docker and open the database. Nothing touches the firewall until `start` or
+    /// `clear`.
     #[builder]
     pub async fn new(
         db_path: &Path,
         timeout: Duration,
         health_server_addr: Option<&str>,
     ) -> Result<Self> {
-        let docker_client = Arc::new(DockerClient::builder().timeout_duration(timeout).build()?);
-        let mut nftables_client = NftablesClient::builder().build();
-        // Enable NAT support for localhost mapped port gateway handling
-        nftables_client.init_base_chains().await?;
-        let nftables_client = Arc::new(Mutex::new(nftables_client));
-
+        let docker_client = Arc::new(DockerClient::connect(timeout)?);
         let db = Arc::new(DB::builder().db_path(db_path).build().await?);
+        let readiness = Readiness::default();
+        let cancellation = CancellationToken::new();
+        let mut tasks = Vec::new();
 
-        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
-        let shutdown_rx = Arc::new(Mutex::new(shutdown_rx));
-
-        // Setup metrics
-        let prometheus_handle = server::setup_metrics()?;
-
-        // Start health server if requested
-        let health_server_handle = if let Some(addr) = health_server_addr {
-            let health_server =
-                server::HealthServer::new(addr, prometheus_handle, crate::VERSION.to_string())
-                    .await?;
-
-            let handle = tokio::spawn(async move {
-                if let Err(e) = health_server.serve().await {
-                    error!("Health server error: {}", e);
+        if let Some(addr) = health_server_addr {
+            let health_server = server::HealthServer::new(
+                addr,
+                server::setup_metrics()?,
+                VERSION.to_string(),
+                readiness.clone(),
+            )
+            .await?;
+            let shutdown = cancellation.clone();
+            tasks.push(tokio::spawn(async move {
+                if let Err(failure) = health_server.serve(shutdown).await {
+                    error!(%failure, "health server failed");
                 }
-            });
-            Some(handle)
-        } else {
-            None
-        };
+            }));
+        }
 
-        let cleanup_tracker = Arc::new(CleanupTracker::builder().db(db.clone()).build());
-
-        let cancellation_token = CancellationToken::new();
-
-        let handlers = Self {
+        Ok(Self {
             docker_client,
-            nftables_client,
             db,
-            shutdown_tx,
-            shutdown_rx,
-            task_handles: Arc::new(StdMutex::new(Vec::new())),
-            health_server_handle: Arc::new(health_server_handle),
-            start_time: chrono::Utc::now(),
-            cleanup_tracker,
-            cancellation_token,
-        };
-
-        Ok(handlers)
+            firewall: Arc::new(Mutex::new(())),
+            readiness,
+            cancellation,
+            tasks: Arc::new(StdMutex::new(tasks)),
+        })
     }
 
-    pub async fn start(self) -> Result<Self> {
-        info!("Starting harborshield rule handlers");
+    /// Synchronise with Docker, install the firewall, report ready, then follow events.
+    pub async fn start(mut self) -> Result<Self> {
+        info!("Starting harborshield");
+        self.docker_client = Arc::new(self.docker_client.negotiated().await?);
+        let since = chrono::Utc::now().timestamp();
+        self.resync().await?;
+        self.reconcile().await?;
+        self.readiness.set(true);
 
-        // Clean up orphaned rules from previous runs
-        self.cleanup_orphaned_rules().await?;
-
-        // Sync existing containers
-        let stopped_container_ids = self
-            .sync_containers(self.get_database_containers().await?)
-            .await?;
-
-        // Clean up stopped containers
-        self.cleanup_stopped_containers(stopped_container_ids)
-            .await?;
-
-        let handlers = Arc::new(self.clone());
-        // Start event listener
-        let event_handle = self.spawn_event_listener(handlers);
-        self.task_handles.lock().unwrap().push(event_handle);
-
-        // Update metrics
-        self.update_metrics().await;
-
+        let follower = self.clone();
+        let handle = tokio::spawn(async move { follower.follow_events(since).await });
+        self.lock_tasks().push(handle);
         Ok(self)
     }
 
+    /// Stop following events and wait for background tasks. The firewall stays in force, so
+    /// containers remain protected while the daemon is down.
     pub async fn stop(self) {
-        info!("Stopping harborshield rule handlers");
-
-        // Cancel all operations
-        self.cancellation_token.cancel();
-
-        // Send shutdown signal to all tasks
-        let _ = self.shutdown_tx.send(()).await;
-
-        // Clean up any partially created resources
-        info!("Performing cleanup of tracked resources");
-        if let Err(e) = self.cleanup_tracker.cleanup_all().await {
-            error!("Failed to cleanup tracked resources: {}", e);
-        }
-
-        // Wait for all background tasks to complete with timeout
-        let timeout_duration = Duration::from_secs(30);
-        let mut tasks = self.task_handles.lock().unwrap();
-        let task_vec = std::mem::take(&mut *tasks);
-        drop(tasks); // Release the lock
-
-        let mut all_tasks = task_vec;
-
-        if let Some(health_handle) = Arc::try_unwrap(self.health_server_handle)
-            .ok()
-            .and_then(|opt| opt)
-        {
-            all_tasks.push(health_handle);
-        }
-
-        for handle in all_tasks {
-            let task_result = tokio::time::timeout(timeout_duration, handle).await;
-            match task_result {
-                Ok(Ok(())) => {
-                    debug!("Task completed successfully");
-                }
-                Ok(Err(e)) => {
-                    error!("Task completed with error: {}", e);
-                }
-                Err(_) => {
-                    warn!("Task did not complete within timeout, forcing shutdown");
-                }
+        info!("Stopping harborshield");
+        self.readiness.set(false);
+        self.cancellation.cancel();
+        let tasks = std::mem::take(&mut *self.lock_tasks());
+        for task in tasks {
+            match tokio::time::timeout(TASK_STOP_LIMIT, task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(failure)) => error!(%failure, "background task failed"),
+                Err(_elapsed) => warn!("background task did not stop within {TASK_STOP_LIMIT:?}"),
             }
         }
-
-        // Shutdown cleanup tracker
-        let cleanup_tracker = Arc::try_unwrap(self.cleanup_tracker)
-            .ok()
-            .expect("Cleanup tracker has other references");
-        if let Err(e) = cleanup_tracker.shutdown().await {
-            error!("Failed to shutdown cleanup tracker: {}", e);
+        match Arc::into_inner(self.db) {
+            Some(db) => db.close().await,
+            None => warn!("database still shared at shutdown; it closes when the last user drops"),
         }
-
-        // Close database connection if we hold the last Arc; otherwise some
-        // tracker spawned task is still using it and the pool will close
-        // when it drops.
-        if let Some(db) = Arc::into_inner(self.db) {
-            if let Err(e) = db.close().await {
-                error!("Failed to close database connection: {}", e);
-            }
-        }
-
-        info!("Harborshield rule handlers stopped gracefully");
+        info!("harborshield stopped");
     }
 
+    /// Remove every firewall object harborshield owns, current or legacy, and forget all
+    /// containers.
     pub async fn clear(&self) -> Result<()> {
-        info!("Clearing all harborshield rules");
-
-        // First, clear all Harborshield container chains from the filter table
-        self.clear_all_harborshield_chains().await?;
-
-        // Clear the main harborshield chain
-        let mut nftables = self.nftables_client.lock().await;
-        nftables.clear_table().await?;
-        drop(nftables);
-
-        // Clear database
-        let containers = self.db.list_containers().await?;
-        for container in containers {
-            self.db.delete_container(&container.id).await?;
-        }
-
-        // Clear tracker
+        info!("Clearing harborshield's firewall rules");
+        let _serial = self.firewall.lock().await;
+        let state = kernel::read_state().await?;
+        kernel::apply(plan::clear(&state)).await?;
+        self.db.delete_all_containers().await?;
         self.docker_client.container_tracker.clear();
-
         Ok(())
     }
 
-    /// Clear all Harborshield container chains from the filter table
-    async fn clear_all_harborshield_chains(&self) -> Result<()> {
-        info!("Clearing all Harborshield container chains from filter table");
-
-        // Get a list of all Harborshield chains (hs-* chains)
-        let list_output = std::process::Command::new("nft")
-            .args(&["-j", "list", "table", "ip", FILTER_TABLE])
-            .output()
-            .map_err(|e| Error::Config {
-                message: format!("Failed to list filter table: {}", e),
-                location: "clear_all_harborshield_chains".to_string(),
-                suggestion: Some("Check nftables permissions".to_string()),
-            })?;
-
-        if !list_output.status.success() {
-            warn!(
-                "Failed to list filter table: {}",
-                String::from_utf8_lossy(&list_output.stderr)
-            );
-            return Ok(()); // Don't fail cleanup if we can't list
-        }
-
-        let output_str = String::from_utf8_lossy(&list_output.stdout);
-
-        // Parse JSON to find all chains starting with "hs-"
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&output_str) {
-            if let Some(nftables) = json.get("nftables").and_then(|n| n.as_array()) {
-                let mut chains_to_delete = Vec::new();
-
-                for item in nftables {
-                    if let Some(chain) = item.get("chain") {
-                        if let Some(name) = chain.get("name").and_then(|n| n.as_str()) {
-                            if name.starts_with("hs-") {
-                                chains_to_delete.push(name.to_string());
-                            }
-                        }
-                    }
-                }
-
-                info!(
-                    "Found {} Harborshield container chains to delete",
-                    chains_to_delete.len()
-                );
-
-                // Delete each container chain
-                for chain_name in chains_to_delete {
-                    // First flush the chain
-                    let flush_result = std::process::Command::new("nft")
-                        .args(&["flush", "chain", "ip", FILTER_TABLE, &chain_name])
-                        .output();
-
-                    if let Err(e) = flush_result {
-                        warn!("Failed to flush chain {}: {}", chain_name, e);
-                    }
-
-                    // Then delete the chain
-                    let delete_result = std::process::Command::new("nft")
-                        .args(&["delete", "chain", "ip", FILTER_TABLE, &chain_name])
-                        .output();
-
-                    match delete_result {
-                        Ok(output) => {
-                            if output.status.success() {
-                                debug!("Successfully deleted chain {}", chain_name);
-                            } else {
-                                warn!(
-                                    "Failed to delete chain {}: {}",
-                                    chain_name,
-                                    String::from_utf8_lossy(&output.stderr)
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Failed to delete chain {}: {}", chain_name, e);
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Clean up orphaned Harborshield rules that don't belong to any running container
-    async fn cleanup_orphaned_rules(&self) -> Result<()> {
-        info!("Cleaning up orphaned Harborshield rules");
-
-        // Get all running containers
-        let running_containers = self.docker_client.get_sorted_containers().await?;
-        let mut valid_chain_names = std::collections::HashSet::new();
-
-        // Build set of valid chain names for running containers
-        for container in running_containers {
-            if let Some(id) = container.id {
-                if let Ok(details) = self.docker_client.try_get_container_by_id(&id).await {
-                    let chain_name = format!(
-                        "hs-{}-{}",
-                        details.name.replace(['_', '.', '/'], "-"),
-                        &id[..12.min(id.len())]
-                    );
-                    valid_chain_names.insert(chain_name);
-                }
-            }
-        }
-
-        // Get all chains in the filter table
-        let list_output = std::process::Command::new("nft")
-            .args(&["-j", "list", "table", "ip", FILTER_TABLE])
-            .output()
-            .map_err(|e| Error::Config {
-                message: format!("Failed to list filter table: {}", e),
-                location: "cleanup_orphaned_rules".to_string(),
-                suggestion: Some("Check nftables permissions".to_string()),
-            })?;
-
-        if !list_output.status.success() {
-            warn!(
-                "Failed to list filter table: {}",
-                String::from_utf8_lossy(&list_output.stderr)
-            );
-            return Ok(()); // Don't fail startup if we can't list
-        }
-
-        let output_str = String::from_utf8_lossy(&list_output.stdout);
-
-        // Parse JSON to find orphaned chains
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&output_str) {
-            if let Some(nftables) = json.get("nftables").and_then(|n| n.as_array()) {
-                let mut orphaned_chains = Vec::new();
-
-                for item in nftables {
-                    if let Some(chain) = item.get("chain") {
-                        if let Some(name) = chain.get("name").and_then(|n| n.as_str()) {
-                            if name.starts_with("hs-") && !valid_chain_names.contains(name) {
-                                orphaned_chains.push(name.to_string());
-                            }
-                        }
-                    }
-                }
-
-                if orphaned_chains.is_empty() {
-                    info!("No orphaned Harborshield chains found");
-                } else {
-                    info!(
-                        "Found {} orphaned Harborshield chains to remove",
-                        orphaned_chains.len()
-                    );
-
-                    // Delete each orphaned chain
-                    for chain_name in orphaned_chains {
-                        info!("Removing orphaned chain: {}", chain_name);
-
-                        // First flush the chain
-                        let flush_result = std::process::Command::new("nft")
-                            .args(&["flush", "chain", "ip", FILTER_TABLE, &chain_name])
-                            .output();
-
-                        if let Err(e) = flush_result {
-                            warn!("Failed to flush orphaned chain {}: {}", chain_name, e);
-                        }
-
-                        // Then delete the chain
-                        let delete_result = std::process::Command::new("nft")
-                            .args(&["delete", "chain", "ip", FILTER_TABLE, &chain_name])
-                            .output();
-
-                        match delete_result {
-                            Ok(output) => {
-                                if output.status.success() {
-                                    debug!("Successfully removed orphaned chain {}", chain_name);
-                                } else {
-                                    warn!(
-                                        "Failed to delete orphaned chain {}: {}",
-                                        chain_name,
-                                        String::from_utf8_lossy(&output.stderr)
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                warn!("Failed to delete orphaned chain {}: {}", chain_name, e);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
+    // Pushes and takes are single operations, so a poisoned lock is safe to reuse.
+    fn lock_tasks(&self) -> std::sync::MutexGuard<'_, Vec<JoinHandle<()>>> {
+        self.tasks.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub fn parse_duration(s: &str) -> std::result::Result<Duration, String> {
-    let s = s.trim();
-
-    if let Some(stripped) = s.strip_suffix("ms") {
-        stripped
-            .parse::<u64>()
-            .map(Duration::from_millis)
-            .map_err(|e| format!("Invalid milliseconds: {}", e))
-    } else if let Some(stripped) = s.strip_suffix('s') {
-        stripped
-            .parse::<u64>()
-            .map(Duration::from_secs)
-            .map_err(|e| format!("Invalid seconds: {}", e))
-    } else if let Some(stripped) = s.strip_suffix('m') {
-        stripped
-            .parse::<u64>()
-            .map(|m| Duration::from_secs(m * 60))
-            .map_err(|e| format!("Invalid minutes: {}", e))
+/// Parse `100ms`, `10s`, `5m`, or a bare number of seconds.
+pub fn parse_duration(input: &str) -> std::result::Result<Duration, String> {
+    let input = input.trim();
+    let (number, unit_ms) = if let Some(millis) = input.strip_suffix("ms") {
+        (millis, 1)
+    } else if let Some(seconds) = input.strip_suffix('s') {
+        (seconds, 1_000)
+    } else if let Some(minutes) = input.strip_suffix('m') {
+        (minutes, 60_000)
     } else {
-        // Default to seconds if no suffix
-        s.parse::<u64>()
-            .map(Duration::from_secs)
-            .map_err(|e| format!("Invalid duration: {}", e))
-    }
+        (input, 1_000)
+    };
+    let count: u64 = number
+        .parse()
+        .map_err(|failure| format!("invalid duration {input:?}: {failure}"))?;
+    count
+        .checked_mul(unit_ms)
+        .map(Duration::from_millis)
+        .ok_or_else(|| format!("duration {input:?} is too long"))
 }
 
-pub async fn shutdown_signal() {
-    let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("Failed to install Ctrl+C handler");
-    };
-
+/// Wait for SIGINT or SIGTERM.
+pub async fn shutdown_signal() -> std::io::Result<()> {
     #[cfg(unix)]
-    let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("Failed to install signal handler")
-            .recv()
-            .await;
-    };
-
+    {
+        let mut terminate = signal::unix::signal(signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = signal::ctrl_c() => result,
+            _ = terminate.recv() => Ok(()),
+        }
+    }
     #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
+    {
+        signal::ctrl_c().await
     }
 }
 
+/// Warn when the kernel is older than the 5.10 harborshield is tested against.
 pub fn check_kernel_version() {
-    use std::process::Command;
-
-    let output = match Command::new("uname").arg("-r").output() {
-        Ok(output) => output,
-        Err(e) => {
-            error!("Failed to check kernel version: {}", e);
+    let release = match std::fs::read_to_string("/proc/sys/kernel/osrelease") {
+        Ok(release) => release,
+        Err(failure) => {
+            warn!(%failure, "could not read the kernel version");
             return;
         }
     };
-
-    if !output.status.success() {
-        error!("Failed to get kernel version");
-        return;
-    }
-
-    let version = String::from_utf8_lossy(&output.stdout);
-    let version = version.trim();
-
-    // Parse major.minor version
-    let parts: Vec<&str> = version.split('.').collect();
-    if parts.len() >= 2 {
-        if let (Ok(major), Ok(minor)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
-            if major < 5 || (major == 5 && minor < 10) {
-                warn!(
-                    "Current kernel version {} is unsupported, 5.10 or greater is required; harborshield will probably not work correctly",
-                    version
-                );
-            }
-        }
+    let release = release.trim();
+    let mut numbers = release.split(['.', '-']).map(str::parse::<u32>);
+    match (numbers.next(), numbers.next()) {
+        (Some(Ok(major)), Some(Ok(minor))) if (major, minor) < (5, 10) => warn!(
+            "kernel {release} is older than 5.10, which harborshield requires; it will probably not work correctly"
+        ),
+        (Some(Ok(_)), Some(Ok(_))) => {}
+        _ => warn!(%release, "could not parse the kernel version"),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::time::Duration;
+
+    use super::parse_duration;
+
+    #[test]
+    fn test_parse_duration_overflow_is_an_error() {
+        assert!(parse_duration("18446744073709551615m").is_err());
+    }
 
     #[test]
     fn test_parse_duration_milliseconds() {

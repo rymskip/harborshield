@@ -1,10 +1,6 @@
-use crate::Result;
-use crate::docker::config::{ConfigVerdict, Protocol, RulePorts, ToNftablesRule};
+use crate::docker::config::{ConfigVerdict, Protocol, RulePorts};
 use bon::Builder;
-use nftables::expr::{Expression, NamedExpression, Payload, PayloadField};
-use nftables::stmt::{Match, Operator, Statement};
 use serde::{Deserialize, Deserializer, Serialize};
-use std::borrow::Cow;
 #[derive(Debug, Clone, Serialize, Builder)]
 pub struct RuleConfig {
     #[serde(default)]
@@ -42,6 +38,7 @@ impl<'de> Deserialize<'de> for RuleConfig {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct TempRuleConfig {
             #[serde(default)]
             log_prefix: String,
@@ -231,167 +228,9 @@ impl<'de> Deserialize<'de> for RuleConfig {
     }
 }
 
-/// Implementation for RuleConfig (output rules)
-impl ToNftablesRule for RuleConfig {
-    fn to_nftables_statements(&self) -> Result<Vec<Statement<'static>>> {
-        let mut statements = Vec::new();
-
-        // Match protocol
-        let protocol_str = match self.proto {
-            Protocol::Tcp => "tcp",
-            Protocol::Udp => "udp",
-        };
-        statements.push(Self::match_protocol(protocol_str));
-
-        // Match destination IPs if specified
-        if !self.ips.is_empty() {
-            // Create a set expression for multiple IPs
-            let mut ip_exprs = Vec::new();
-
-            for addr_or_range in &self.ips {
-                match addr_or_range {
-                    super::AddrOrRange::Addr(ip) => {
-                        ip_exprs.push(Expression::String(Cow::Owned(ip.to_string())));
-                    }
-                    super::AddrOrRange::Range(start, end) => {
-                        ip_exprs.push(Expression::Range(Box::new(nftables::expr::Range {
-                            range: [
-                                Expression::String(Cow::Owned(start.to_string())),
-                                Expression::String(Cow::Owned(end.to_string())),
-                            ],
-                        })));
-                    }
-                    super::AddrOrRange::Net(net) => {
-                        // Parse CIDR notation to create a prefix expression
-                        let addr = net.addr();
-                        let prefix_len = net.prefix_len() as u32;
-
-                        ip_exprs.push(Expression::Named(NamedExpression::Prefix(
-                            nftables::expr::Prefix {
-                                addr: Box::new(Expression::String(Cow::Owned(addr.to_string()))),
-                                len: prefix_len,
-                            },
-                        )));
-                    }
-                }
-            }
-
-            // Determine protocol based on first IP
-            let protocol = match self.ips.first() {
-                Some(super::AddrOrRange::Addr(ip)) => {
-                    if ip.is_ipv4() {
-                        "ip"
-                    } else {
-                        "ip6"
-                    }
-                }
-                Some(super::AddrOrRange::Range(start, _)) => {
-                    if start.is_ipv4() {
-                        "ip"
-                    } else {
-                        "ip6"
-                    }
-                }
-                Some(super::AddrOrRange::Net(net)) => {
-                    if net.addr().is_ipv4() {
-                        "ip"
-                    } else {
-                        "ip6"
-                    }
-                }
-                _ => "ip",
-            };
-
-            if ip_exprs.len() == 1 {
-                // Single IP/range/prefix - use direct match
-                statements.push(Statement::Match(Match {
-                    left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
-                        PayloadField {
-                            protocol: Cow::Borrowed(protocol),
-                            field: Cow::Borrowed("daddr"),
-                        },
-                    ))),
-                    right: ip_exprs.into_iter().next().unwrap(),
-                    op: Operator::EQ,
-                }));
-            } else {
-                // Multiple IPs - use anonymous set
-                let set_items: Vec<nftables::expr::SetItem> = ip_exprs
-                    .into_iter()
-                    .map(|expr| nftables::expr::SetItem::Element(expr))
-                    .collect();
-
-                statements.push(Statement::Match(Match {
-                    left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
-                        PayloadField {
-                            protocol: Cow::Borrowed(protocol),
-                            field: Cow::Borrowed("daddr"),
-                        },
-                    ))),
-                    right: Expression::Named(NamedExpression::Set(set_items)),
-                    op: Operator::EQ,
-                }));
-            }
-        }
-
-        // Match source ports if specified
-        for port in &self.src_ports {
-            match port {
-                RulePorts::Single(p) => {
-                    statements.push(Self::match_src_port(protocol_str, *p));
-                }
-                RulePorts::Range(start, end) => {
-                    statements.push(Statement::Match(Match {
-                        left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
-                            PayloadField {
-                                protocol: Cow::Owned(protocol_str.to_string()),
-                                field: Cow::Borrowed("sport"),
-                            },
-                        ))),
-                        right: Expression::Range(Box::new(nftables::expr::Range {
-                            range: [
-                                Expression::Number(*start as u32),
-                                Expression::Number(*end as u32),
-                            ],
-                        })),
-                        op: Operator::EQ,
-                    }));
-                }
-            }
-            break; // For now, only handle first port/range
-        }
-
-        // Match destination ports
-        for port in &self.dst_ports {
-            match port {
-                RulePorts::Single(p) => {
-                    statements.push(Self::match_dst_port(protocol_str, *p));
-                }
-                RulePorts::Range(start, end) => {
-                    statements.push(Self::match_dst_port_range(protocol_str, *start, *end));
-                }
-            }
-            break; // For now, only handle first port/range
-        }
-
-        // Add counter
-        statements.push(Self::counter_statement());
-
-        // Add log if configured
-        if !self.log_prefix.is_empty() {
-            statements.push(Self::log_statement(Some(&self.log_prefix)));
-        }
-
-        // Add verdict
-        statements.push(Self::verdict_to_statement(&self.verdict));
-
-        Ok(statements)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::RuleConfig;
 
     #[test]
     fn test_rule_config_valid_minimal() {
@@ -484,14 +323,17 @@ ips:
     #[test]
     fn test_rule_config_log_prefix_too_long() {
         let long_prefix = "a".repeat(65);
-        let yaml = format!(r#"
+        let yaml = format!(
+            r#"
 proto: tcp
 dst_ports:
   - 80
 ips:
   - 192.168.1.1
 log_prefix: '{}'
-"#, long_prefix);
+"#,
+            long_prefix
+        );
         let result: std::result::Result<RuleConfig, _> = serde_saphyr::from_str(&yaml);
         assert!(result.is_err());
     }
@@ -510,24 +352,9 @@ network: default
     }
 
     #[test]
-    fn test_rule_to_nftables_tcp() {
-        let rule = RuleConfig::builder()
-            .proto(Protocol::Tcp)
-            .dst_ports(vec![RulePorts::Single(80)])
-            .ips(vec!["192.168.1.1".parse().unwrap()])
-            .build();
-        let statements = rule.to_nftables_statements().unwrap();
-        assert!(!statements.is_empty());
-    }
-
-    #[test]
-    fn test_rule_to_nftables_udp() {
-        let rule = RuleConfig::builder()
-            .proto(Protocol::Udp)
-            .dst_ports(vec![RulePorts::Single(53)])
-            .ips(vec!["8.8.8.8".parse().unwrap()])
-            .build();
-        let statements = rule.to_nftables_statements().unwrap();
-        assert!(!statements.is_empty());
+    fn test_rule_config_rejects_unknown_fields() {
+        let yaml = "proto: tcp\ndst_ports:\n  - 80\nip:\n  - 192.168.1.1";
+        let result: std::result::Result<RuleConfig, _> = serde_saphyr::from_str(yaml);
+        assert!(result.is_err());
     }
 }

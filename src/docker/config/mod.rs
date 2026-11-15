@@ -1,6 +1,5 @@
 mod external;
 mod localhost;
-pub mod nftables_convert;
 mod rule;
 #[cfg(test)]
 mod tests;
@@ -10,9 +9,8 @@ mod verdict;
 use crate::{Error, Result};
 use bon::Builder;
 pub use external::ExternalRules;
-use ipnet::{IpNet, Ipv4Net, Ipv6Net};
+use ipnet::IpNet;
 pub use localhost::LocalRules;
-pub use nftables_convert::{RuleContext, ToNftablesRule};
 pub use rule::RuleConfig;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
@@ -32,6 +30,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Builder)]
+#[serde(deny_unknown_fields)]
 pub struct MappedPorts {
     #[serde(default)]
     #[builder(default)]
@@ -45,7 +44,7 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AddrOrRange {
     Addr(IpAddr),
     Range(IpAddr, IpAddr),
@@ -66,8 +65,8 @@ impl<'de> Deserialize<'de> for AddrOrRange {
     where
         D: serde::Deserializer<'de>,
     {
-        let s = String::deserialize(deserializer)?;
-        s.parse().map_err(serde::de::Error::custom)
+        let raw = String::deserialize(deserializer)?;
+        raw.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -84,48 +83,44 @@ impl fmt::Display for AddrOrRange {
 impl FromStr for AddrOrRange {
     type Err = Error;
 
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        // Check for invalid "0.0.0.0/0" which causes nftables to fail
-        if s == "0.0.0.0/0" {
+    fn from_str(input: &str) -> std::result::Result<Self, Self::Err> {
+        if input == "0.0.0.0/0" {
             return Err(Error::invalid_ip(
-                s,
+                input,
                 "0.0.0.0/0 is not supported by nftables. Use specific IP addresses or ranges instead",
             ));
         }
 
-        if s.contains('/') {
-            // CIDR notation
-            if let Ok(net) = s.parse::<Ipv4Net>() {
-                return Ok(AddrOrRange::Net(IpNet::V4(net)));
-            }
-            if let Ok(net) = s.parse::<Ipv6Net>() {
-                return Ok(AddrOrRange::Net(IpNet::V6(net)));
-            }
-            return Err(Error::invalid_ip(s, "Invalid CIDR notation"));
-        } else if s.contains('-') {
-            // Range notation
-            let parts: Vec<&str> = s.split('-').collect();
-            if parts.len() != 2 {
+        let address = |part: &str| {
+            part.parse::<IpAddr>()
+                .map_err(|failure| Error::invalid_ip(part, failure.to_string()))
+        };
+
+        if let Some((start, end)) = input.split_once('-') {
+            let (start, end) = (address(start)?, address(end)?);
+            if start.is_ipv4() != end.is_ipv4() {
                 return Err(Error::invalid_ip(
-                    s,
-                    "Range must have exactly two parts separated by '-'",
+                    input,
+                    "a range must not mix IPv4 and IPv6",
                 ));
             }
-
-            let start = parts[0]
-                .parse::<IpAddr>()
-                .map_err(|_| Error::invalid_ip(parts[0], "Invalid IP address in range start"))?;
-            let end = parts[1]
-                .parse::<IpAddr>()
-                .map_err(|_| Error::invalid_ip(parts[1], "Invalid IP address in range end"))?;
-
+            if start > end {
+                return Err(Error::invalid_ip(
+                    input,
+                    "a range must start at or before its end",
+                ));
+            }
             return Ok(AddrOrRange::Range(start, end));
         }
 
-        // Single address
-        s.parse::<IpAddr>()
-            .map(AddrOrRange::Addr)
-            .map_err(|_| Error::invalid_ip(s, "Invalid IP address"))
+        if input.contains('/') {
+            return input
+                .parse::<IpNet>()
+                .map(|network| AddrOrRange::Net(network.trunc()))
+                .map_err(|failure| Error::invalid_ip(input, failure.to_string()));
+        }
+
+        address(input).map(AddrOrRange::Addr)
     }
 }
 
@@ -167,8 +162,8 @@ impl<'de> Deserialize<'de> for RulePorts {
     where
         D: serde::Deserializer<'de>,
     {
-        let s = String::deserialize(deserializer)?;
-        s.parse().map_err(serde::de::Error::custom)
+        let raw = String::deserialize(deserializer)?;
+        raw.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -184,64 +179,31 @@ impl fmt::Display for RulePorts {
 impl FromStr for RulePorts {
     type Err = Error;
 
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        if s.contains('-') {
-            let parts: Vec<&str> = s.split('-').collect();
-            if parts.len() != 2 {
-                return Err(Error::config(format!("Invalid port range: {}", s)));
+    fn from_str(input: &str) -> std::result::Result<Self, Self::Err> {
+        let port = |part: &str| {
+            part.parse::<u16>()
+                .map_err(|failure| Error::config(format!("invalid port {part:?}: {failure}")))
+        };
+        match input.split_once('-') {
+            Some((start, end)) => {
+                let (start, end) = (port(start)?, port(end)?);
+                if start > end {
+                    return Err(Error::config(format!(
+                        "invalid port range {input:?}: start {start} is after end {end}"
+                    )));
+                }
+                Ok(RulePorts::Range(start, end))
             }
-
-            let start = parts[0]
-                .parse::<u16>()
-                .map_err(|_| Error::config(format!("Invalid port: {}", parts[0])))?;
-            let end = parts[1]
-                .parse::<u16>()
-                .map_err(|_| Error::config(format!("Invalid port: {}", parts[1])))?;
-
-            if start > end {
-                return Err(Error::config(format!(
-                    "Invalid port range: start {} > end {}",
-                    start, end
-                )));
-            }
-
-            Ok(RulePorts::Range(start, end))
-        } else {
-            let port = s
-                .parse::<u16>()
-                .map_err(|_| Error::config(format!("Invalid port: {}", s)))?;
-            Ok(RulePorts::Single(port))
+            None => port(input).map(RulePorts::Single),
         }
     }
 }
 
 impl Config {
-    pub fn new() -> Self {
-        Self {
-            mapped_ports: MappedPorts::default(),
-            output: Vec::new(),
-        }
-    }
-
-    pub fn with_mapped_ports(mut self, mapped_ports: MappedPorts) -> Self {
-        self.mapped_ports = mapped_ports;
-        self
-    }
-
-    pub fn with_output(mut self, output: Vec<RuleConfig>) -> Self {
-        self.output = output;
-        self
-    }
-
-    pub fn add_output_rule(mut self, rule: RuleConfig) -> Self {
-        self.output.push(rule);
-        self
-    }
-
     pub fn validate(&self) -> Result<()> {
         // Validate output rules
-        for (i, rule) in self.output.iter().enumerate() {
-            Self::validate_rule(rule, i)?;
+        for (index, rule) in self.output.iter().enumerate() {
+            Self::validate_rule(rule, index)?;
         }
 
         // Validate mapped ports
@@ -349,44 +311,22 @@ impl Config {
     }
 
     fn validate_ip_family_consistency(ips: &[AddrOrRange], context: &str) -> Result<()> {
-        if ips.is_empty() {
-            return Ok(());
-        }
-
-        // Determine the family of the first IP
-        let first_is_ipv4 = match &ips[0] {
-            AddrOrRange::Addr(addr) => addr.is_ipv4(),
-            AddrOrRange::Range(start, _) => start.is_ipv4(),
-            AddrOrRange::Net(net) => match net {
-                IpNet::V4(_) => true,
-                IpNet::V6(_) => false,
-            },
+        let is_ipv4 = |entry: &AddrOrRange| match entry {
+            AddrOrRange::Addr(address) | AddrOrRange::Range(address, _) => address.is_ipv4(),
+            AddrOrRange::Net(network) => matches!(network, IpNet::V4(_)),
         };
-
-        // Check that all subsequent IPs match the first family
-        for ip in ips.iter().skip(1) {
-            let is_ipv4 = match ip {
-                AddrOrRange::Addr(addr) => addr.is_ipv4(),
-                AddrOrRange::Range(start, _) => start.is_ipv4(),
-                AddrOrRange::Net(net) => match net {
-                    IpNet::V4(_) => true,
-                    IpNet::V6(_) => false,
-                },
-            };
-
-            if is_ipv4 != first_is_ipv4 {
-                return Err(Error::config(format!(
-                    "{}: Mixed IPv4 and IPv6 addresses are not supported. {} is {}, but {} is {}",
-                    context,
-                    ips[0],
-                    if first_is_ipv4 { "IPv4" } else { "IPv6" },
-                    ip,
-                    if is_ipv4 { "IPv4" } else { "IPv6" }
-                )));
-            }
+        let family = |ipv4: bool| if ipv4 { "IPv4" } else { "IPv6" };
+        let Some((first, rest)) = ips.split_first() else {
+            return Ok(());
+        };
+        match rest.iter().find(|entry| is_ipv4(entry) != is_ipv4(first)) {
+            Some(mixed) => Err(Error::config(format!(
+                "{context}: mixed IPv4 and IPv6 addresses are not supported. {first} is {}, but {mixed} is {}",
+                family(is_ipv4(first)),
+                family(is_ipv4(mixed)),
+            ))),
+            None => Ok(()),
         }
-
-        Ok(())
     }
 }
 
@@ -398,6 +338,7 @@ impl<'de> Deserialize<'de> for Config {
     {
         // First deserialize to a temporary structure
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct TempConfig {
             #[serde(default)]
             mapped_ports: MappedPorts,

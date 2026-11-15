@@ -1,8 +1,11 @@
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::time::Duration;
+
 use clap::Parser;
 use harborshield::{Harborshield, VERSION, check_kernel_version, parse_duration, shutdown_signal};
-use std::path::PathBuf;
-use std::time::Duration;
 use tracing::{error, info};
+use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 #[derive(Parser, Debug)]
@@ -13,23 +16,23 @@ struct Args {
     clear: bool,
 
     /// Directory to store state in
-    #[arg(short = 'd', long, default_value = ".")]
+    #[arg(short = 'd', long, env = "DATA_DIR", default_value = ".")]
     data_dir: PathBuf,
 
-    /// Enable debug logging
+    /// Log at debug level instead of info (RUST_LOG, when set, takes precedence)
     #[arg(long)]
     debug: bool,
 
     /// Path to log to (use "stdout" or "stderr" for console output)
-    #[arg(short = 'l', long, default_value = "stdout")]
+    #[arg(short = 'l', long, env = "LOG_PATH", default_value = "stdout")]
     log_path: String,
 
     /// Timeout for Docker API requests
-    #[arg(short = 't', long, default_value = "10s", value_parser = parse_duration)]
+    #[arg(short = 't', long, env = "TIMEOUT", default_value = "10s", value_parser = parse_duration)]
     timeout: Duration,
 
     /// Enable health check server on specified address (e.g., "127.0.0.1:8080")
-    #[arg(long)]
+    #[arg(long, env = "HEALTH_SERVER_ADDR")]
     health_server: Option<String>,
 
     /// Print version and build information and exit
@@ -37,133 +40,127 @@ struct Args {
     version_info: bool,
 }
 
-#[tokio::main]
-async fn main() {
-    // Load .env file if it exists
-    if let Err(e) = dotenvy::dotenv() {
-        // It's ok if .env doesn't exist, but log other errors
-        if e.not_found() {
-            // Silent - .env is optional
-        } else {
-            eprintln!("Error loading .env file: {}", e);
-        }
+fn main() -> ExitCode {
+    // A missing .env is normal; any other problem with it is worth reporting.
+    if let Err(failure) = dotenvy::dotenv()
+        && !failure.not_found()
+    {
+        eprintln!("could not load .env: {failure}");
     }
 
     let args = Args::parse();
-
     if args.version_info {
-        println!("harborshield {}", VERSION);
-        // Note: RUSTC_VERSION would need to be set at build time
+        println!("harborshield {VERSION}");
         println!("harborshield-rust (Rust port)");
-        return;
+        return ExitCode::SUCCESS;
     }
 
-    // Initialize logging
-    let env_filter = if args.debug {
-        EnvFilter::new("debug")
-    } else {
-        EnvFilter::new("info")
+    let data_dir = match args.data_dir.canonicalize() {
+        Ok(data_dir) => data_dir,
+        Err(failure) => {
+            eprintln!(
+                "data directory {} is unusable: {failure}",
+                args.data_dir.display()
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let log_file = match args.log_path.as_str() {
+        "stdout" | "stderr" => None,
+        path => Some(PathBuf::from(path)),
     };
 
-    let subscriber = tracing_subscriber::registry().with(env_filter);
-
-    if args.log_path == "stdout" || args.log_path == "stderr" {
-        let subscriber = subscriber.with(fmt::layer());
-        tracing::subscriber::set_global_default(subscriber)
-            .expect("Failed to set tracing subscriber");
-    } else {
-        let file_appender = tracing_appender::rolling::never("", &args.log_path);
-        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-        let subscriber = subscriber.with(fmt::layer().with_writer(non_blocking));
-        tracing::subscriber::set_global_default(subscriber)
-            .expect("Failed to set tracing subscriber");
-    }
-
-    // Check kernel version
-    check_kernel_version();
-
-    // Check for required capabilities
+    // Confine before any thread exists: the logging worker and the runtime's threads must all
+    // start inside the sandbox.
     #[cfg(target_os = "linux")]
     {
-        if let Err(e) = harborshield::security::check_capabilities() {
-            error!("Capability check failed: {}", e);
-
-            // The error message already includes remediation information
-            // from the SecurityError::MissingCapability Display implementation
-
-            std::process::exit(1);
+        if let Err(failure) = harborshield::security::check_capabilities() {
+            eprintln!("{failure}");
+            return ExitCode::FAILURE;
         }
-        info!("All required capabilities are present");
+        if let Err(failure) =
+            harborshield::security::apply_restrictions(&data_dir, log_file.as_deref())
+        {
+            eprintln!("could not apply security restrictions: {failure}");
+            return ExitCode::FAILURE;
+        }
     }
 
-    // Get absolute path for data directory
-    let data_dir = match args.data_dir.canonicalize() {
-        Ok(path) => path,
-        Err(e) => {
-            error!("Failed to get absolute path for data directory: {}", e);
-            std::process::exit(1);
+    // Held until exit: dropping it stops the file writer from flushing.
+    let _log_guard = match init_logging(&args) {
+        Ok(guard) => guard,
+        Err(failure) => {
+            eprintln!("could not set up logging: {failure}");
+            return ExitCode::FAILURE;
         }
     };
+    check_kernel_version();
 
-    let db_path = data_dir.join("db.sqlite");
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(failure) => {
+            error!(%failure, "could not start the async runtime");
+            return ExitCode::FAILURE;
+        }
+    };
+    match runtime.block_on(run(args, data_dir.join("db.sqlite"))) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(failure) => {
+            error!(%failure, "harborshield failed");
+            ExitCode::FAILURE
+        }
+    }
+}
 
-    // Create rule handlers with optional health server
-    let harborshield = match Harborshield::builder()
+fn init_logging(args: &Args) -> Result<Option<WorkerGuard>, Box<dyn std::error::Error>> {
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(directives) => EnvFilter::try_new(directives)?,
+        Err(_unset) => EnvFilter::new(if args.debug { "debug" } else { "info" }),
+    };
+    let registry = tracing_subscriber::registry().with(filter);
+    match args.log_path.as_str() {
+        "stdout" => {
+            registry.with(fmt::layer()).try_init()?;
+            Ok(None)
+        }
+        "stderr" => {
+            registry
+                .with(fmt::layer().with_writer(std::io::stderr))
+                .try_init()?;
+            Ok(None)
+        }
+        path => {
+            let (writer, guard) =
+                tracing_appender::non_blocking(tracing_appender::rolling::never("", path));
+            registry
+                .with(fmt::layer().with_writer(writer).with_ansi(false))
+                .try_init()?;
+            Ok(Some(guard))
+        }
+    }
+}
+
+async fn run(args: Args, db_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let daemon = Harborshield::builder()
         .db_path(&db_path)
         .timeout(args.timeout)
         .maybe_health_server_addr(args.health_server.as_deref())
         .build()
-        .await
-    {
-        Ok(handlers) => handlers,
-        Err(e) => {
-            error!("Failed to initialize rule handlers: {}", e);
-            std::process::exit(1);
-        }
-    };
+        .await?;
 
-    // Apply security restrictions
-    let log_path = if args.log_path != "stdout" && args.log_path != "stderr" {
-        Some(PathBuf::from(&args.log_path))
-    } else {
-        None
-    };
-
-    #[cfg(target_os = "linux")]
-    {
-        // Apply security restrictions
-        if let Err(e) = harborshield::security::apply_restrictions(&db_path, log_path.as_deref()) {
-            error!("Failed to apply security restrictions: {}", e);
-            std::process::exit(1);
-        }
-    }
-
-    // Handle clear mode
     if args.clear {
-        info!("Clearing all harborshield rules");
-        if let Err(e) = harborshield.clear().await {
-            error!("Failed to clear rules: {}", e);
-            std::process::exit(1);
-        }
-        return;
+        daemon.clear().await?;
+        return Ok(());
     }
 
-    // Log version info
-    info!("Starting harborshield v{}", VERSION);
-
-    // Start the rule handlers
-    let harborshield = match harborshield.start().await {
-        Ok(started_handlers) => started_handlers,
-        Err(e) => {
-            error!("Failed to start rule handlers: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    // Wait for shutdown signal
-    shutdown_signal().await;
+    info!("Starting harborshield v{VERSION}");
+    let daemon = daemon.start().await?;
+    let signal = shutdown_signal().await;
     info!("Shutting down");
-
-    // Stop the rule handlers
-    harborshield.stop().await;
+    daemon.stop().await;
+    signal?;
+    Ok(())
 }

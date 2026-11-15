@@ -271,7 +271,10 @@ mod tests {
     #[test]
     fn test_invalid_config_constructor() {
         let err = ValidationError::invalid_config(10, "test message");
-        assert!(matches!(err, ValidationError::InvalidConfig { line: 10, .. }));
+        assert!(matches!(
+            err,
+            ValidationError::InvalidConfig { line: 10, .. }
+        ));
     }
 
     #[test]
@@ -283,7 +286,12 @@ mod tests {
             "use a valid port number",
         );
         match err {
-            ValidationError::InvalidConfig { line, field, suggestion, .. } => {
+            ValidationError::InvalidConfig {
+                line,
+                field,
+                suggestion,
+                ..
+            } => {
                 assert_eq!(line, 5);
                 assert_eq!(field, Some("port".to_string()));
                 assert_eq!(suggestion, Some("use a valid port number".to_string()));
@@ -313,7 +321,10 @@ mod tests {
     #[test]
     fn test_security_violation_constructor() {
         let err = ValidationError::security_violation("firewall", "blocked IP", "high");
-        assert!(matches!(err, ValidationError::SecurityPolicyViolation { .. }));
+        assert!(matches!(
+            err,
+            ValidationError::SecurityPolicyViolation { .. }
+        ));
     }
 
     #[test]
@@ -321,7 +332,9 @@ mod tests {
         let errors = vec!["error 1".to_string(), "error 2".to_string()];
         let err = ValidationError::multiple_errors(errors);
         match err {
-            ValidationError::Multiple { count, first_error, .. } => {
+            ValidationError::Multiple {
+                count, first_error, ..
+            } => {
                 assert_eq!(count, 2);
                 assert_eq!(first_error, "error 1");
             }

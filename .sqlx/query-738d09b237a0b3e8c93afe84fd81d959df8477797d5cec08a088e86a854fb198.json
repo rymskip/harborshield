@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO containers (id, name) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "738d09b237a0b3e8c93afe84fd81d959df8477797d5cec08a088e86a854fb198"
+}

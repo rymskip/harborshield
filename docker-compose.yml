@@ -29,7 +29,6 @@ services:
 
       # Docker configuration
       DOCKER_HOST: ${DOCKER_HOST:-unix:///var/run/docker.sock}
-      DOCKER_API_VERSION: ${DOCKER_API_VERSION:-}
     # Install runtime dependencies and run the binary
     entrypoint: /bin/bash
     command:
