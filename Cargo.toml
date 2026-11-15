@@ -2,6 +2,48 @@
 members = ["xtask"]
 resolver = "3"
 
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+# Nothing panics on what Docker, the kernel, a label or a caller can cause.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+indexing_slicing = "deny"
+string_slice = "deny"
+get_unwrap = "deny"
+unwrap_in_result = "deny"
+panic_in_result_fn = "deny"
+# No `as` that can truncate, wrap, drop a sign or lose precision.
+cast_possible_truncation = "deny"
+cast_sign_loss = "deny"
+cast_possible_wrap = "deny"
+cast_precision_loss = "deny"
+# Overflow is chosen, not inherited from the build profile.
+arithmetic_side_effects = "deny"
+# A wildcard that stands for one variant names it.
+match_wildcard_for_single_variants = "deny"
+# A failure is not an absence, and a discarded one is a failure nobody sees.
+unused_result_ok = "deny"
+map_err_ignore = "deny"
+let_underscore_must_use = "deny"
+let_underscore_future = "deny"
+# A run of bool arguments says nothing at the call site.
+fn_params_excessive_bools = "deny"
+# No guard is held across an await.
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
+# A name says what it holds, and an import says where it comes from.
+min_ident_chars = "deny"
+wildcard_imports = "deny"
+enum_glob_use = "deny"
+# Warnings are fixed, never allowed.
+allow_attributes = "deny"
+
 # =============================================================================
 # Development Tasks (xtask)
 # =============================================================================
@@ -69,6 +111,9 @@ exclude = [
     ".sqlx/",
     "xtask/"
 ]
+
+[lints]
+workspace = true
 
 [dependencies]
 bon = "3.10.3"
