@@ -1,0 +1,63 @@
+#!/bin/sh
+# Probe one endpoint and print exactly one verdict line:
+#   CONNECTED <banner>   a hs-serve listener answered
+#   REFUSED              the peer actively refused (RST or ICMP unreachable)
+#   TIMEOUT              nothing came back (a drop)
+#   SILENT               a TCP connection opened but no service answered, which is how a drop
+#                        behind docker-proxy looks: the proxy accepts, then cannot reach it
+# Anything else is printed as ERROR and exits non-zero, so a broken probe is never read as a drop.
+# Usage: hs-probe tcp|udp HOST PORT [SOURCE_IP]
+set -u
+
+if [ "$#" -lt 3 ]; then
+    echo "ERROR usage: hs-probe tcp|udp HOST PORT [SOURCE_IP]"
+    exit 64
+fi
+
+proto=$1
+host=$2
+port=$3
+case "$host" in
+    *:*) host="[$host]" ;;
+esac
+bind=""
+if [ "$#" -ge 4 ]; then
+    bind=",bind=$4"
+fi
+
+case "$proto" in
+    tcp) output=$(socat -T 3 -u "TCP:$host:$port,connect-timeout=3$bind" STDOUT 2>&1) ;;
+    udp) output=$(echo ping | socat -T 3 - "UDP:$host:$port$bind" 2>&1) ;;
+    *)
+        echo "ERROR unknown protocol '$proto'"
+        exit 64
+        ;;
+esac
+status=$?
+
+banner=$(printf '%s\n' "$output" | grep -m 1 '^hs-e2e ' || true)
+if [ -n "$banner" ]; then
+    echo "CONNECTED $banner"
+    exit 0
+fi
+
+case "$output" in
+    *"Connection refused"*) echo "REFUSED" ;;
+    *"timed out"*) echo "TIMEOUT" ;;
+    "")
+        # Silence after the inactivity timeout: for UDP a dropped datagram, for TCP an open
+        # connection nothing answered on.
+        if [ "$status" -ne 0 ]; then
+            echo "ERROR status=$status with no output"
+            exit 1
+        elif [ "$proto" = "udp" ]; then
+            echo "TIMEOUT"
+        else
+            echo "SILENT"
+        fi
+        ;;
+    *)
+        echo "ERROR status=$status output=$(printf '%s' "$output" | tr '\n' ' ')"
+        exit 1
+        ;;
+esac

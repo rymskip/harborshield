@@ -20,7 +20,6 @@ target/
 
 /target
 .env
-/tests/common/logs
 compose.log
 # pixi environments
 .pixi/*

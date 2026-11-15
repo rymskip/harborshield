@@ -38,15 +38,17 @@ enum Commands {
         watch: bool,
     },
 
-    /// Run the full test suite
+    /// Run the tests that need no privileges (unit tests and the e2e crate's build)
     Test {
-        /// Run ignored (integration) tests
-        #[arg(short, long)]
-        ignored: bool,
-
         /// Run only unit tests
         #[arg(short, long)]
         unit: bool,
+    },
+
+    /// Run the end-to-end suite, and the privileged unit tests, in a Docker-in-Docker sandbox
+    E2e {
+        /// Run only e2e tests whose name contains this filter (skips the privileged unit tests)
+        filter: Option<String>,
     },
 
     /// Check code quality (fmt, clippy, test)
@@ -93,7 +95,8 @@ fn main() -> Result<()> {
         Commands::Dev { build, test } => cmd_dev(build, test),
         Commands::Shell => cmd_shell(),
         Commands::Run { release, watch } => cmd_run(release, watch),
-        Commands::Test { ignored, unit } => cmd_test(ignored, unit),
+        Commands::Test { unit } => cmd_test(unit),
+        Commands::E2e { filter } => cmd_e2e(filter.as_deref()),
         Commands::Check { fix } => cmd_check(fix),
         Commands::Build { linux } => cmd_build(linux),
         Commands::Stop => cmd_stop(),
@@ -162,21 +165,209 @@ fn cmd_run(release: bool, watch: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_test(ignored: bool, unit: bool) -> Result<()> {
+fn cmd_test(unit: bool) -> Result<()> {
     let mut args = vec!["test"];
 
     if unit {
         args.push("--lib");
         println!("Running unit tests...");
-    } else if ignored {
-        args.extend(["--", "--ignored"]);
-        println!("Running integration tests...");
     } else {
         println!("Running all tests...");
     }
 
     run_command("cargo", &args)?;
     Ok(())
+}
+
+const E2E_SANDBOX_IMAGE: &str = "harborshield-e2e-sandbox";
+const E2E_SANDBOX_LABEL: &str = "harborshield.e2e.sandbox";
+const E2E_DOCKER_VOLUME: &str = "harborshield-e2e-docker";
+
+/// Build the test binaries on the host, then run them inside a privileged sandbox with its
+/// own dockerd and network namespace, so the suite never touches the host firewall.
+fn cmd_e2e(filter: Option<&str>) -> Result<()> {
+    let root = project_root();
+    let root_str = root
+        .to_str()
+        .context("project root path is not UTF-8")?
+        .to_owned();
+
+    // The sandbox's image cache volume cannot be shared by two dockerds.
+    let running = Command::new("docker")
+        .args([
+            "ps",
+            "--quiet",
+            "--filter",
+            &format!("label={E2E_SANDBOX_LABEL}"),
+        ])
+        .output()
+        .context("Failed to list running e2e sandboxes")?;
+    if !running.status.success() {
+        anyhow::bail!(
+            "docker ps failed: {}",
+            String::from_utf8_lossy(&running.stderr).trim()
+        );
+    }
+    if !running.stdout.is_empty() {
+        anyhow::bail!("another e2e sandbox is already running; wait for it to finish");
+    }
+
+    println!("==> Building test binaries...");
+    let (unit_exe, e2e_exe) = build_test_binaries()?;
+
+    println!("\n==> Building sandbox image...");
+    let images = format!("{root_str}/tests/e2e/images");
+    run_command(
+        "docker",
+        &[
+            "build",
+            "--quiet",
+            "--tag",
+            E2E_SANDBOX_IMAGE,
+            "--file",
+            &format!("{images}/sandbox.Dockerfile"),
+            &images,
+        ],
+    )?;
+
+    let e2e_dir = root.join("target").join("e2e");
+    let log_dir = e2e_dir.join("logs");
+    if log_dir.exists() {
+        fs::remove_dir_all(&log_dir)
+            .with_context(|| format!("Failed to reset {}", log_dir.display()))?;
+    }
+    fs::create_dir_all(&log_dir)
+        .with_context(|| format!("Failed to create {}", log_dir.display()))?;
+    let e2e_dir = e2e_dir.to_str().context("e2e dir is not UTF-8")?.to_owned();
+    let log_dir = log_dir.to_str().context("log dir is not UTF-8")?.to_owned();
+
+    // Run the privileged unit tests, then the e2e suite; report failure if either failed.
+    let script = r#"unit=0
+if [ -n "$1" ]; then "$1" --ignored --test-threads=1 || unit=$?; fi
+shift
+"$@" || exit $?
+exit "$unit""#;
+    let unit_arg = if filter.is_some() {
+        String::new()
+    } else {
+        unit_exe
+    };
+    let mut args = vec![
+        "run".to_owned(),
+        "--rm".to_owned(),
+        "--privileged".to_owned(),
+        "--name".to_owned(),
+        format!("harborshield-e2e-{}", std::process::id()),
+        "--label".to_owned(),
+        E2E_SANDBOX_LABEL.to_owned(),
+        // Docker disables IPv6 in containers on IPv4-only networks; the inner dockerd needs it
+        // for the dual-stack scenarios.
+        "--sysctl".to_owned(),
+        "net.ipv6.conf.all.disable_ipv6=0".to_owned(),
+        "--sysctl".to_owned(),
+        "net.ipv6.conf.default.disable_ipv6=0".to_owned(),
+        "--volume".to_owned(),
+        format!("{root_str}:{root_str}:ro"),
+        "--volume".to_owned(),
+        format!("{e2e_dir}:{e2e_dir}"),
+        "--volume".to_owned(),
+        format!("{E2E_DOCKER_VOLUME}:/var/lib/docker"),
+        "--env".to_owned(),
+        format!("HARBORSHIELD_E2E_LOG_DIR={log_dir}"),
+        "--env".to_owned(),
+        format!("HARBORSHIELD_E2E_IMAGES={images}"),
+        "--env".to_owned(),
+        format!("HARBORSHIELD_E2E_OWNER={}", invoking_owner()?),
+        "--env".to_owned(),
+        "RUST_BACKTRACE=1".to_owned(),
+        "--workdir".to_owned(),
+        root_str.clone(),
+        E2E_SANDBOX_IMAGE.to_owned(),
+        "sh".to_owned(),
+        "-c".to_owned(),
+        script.to_owned(),
+        "sh".to_owned(),
+        unit_arg,
+        e2e_exe,
+        "--ignored".to_owned(),
+        "--test-threads=1".to_owned(),
+    ];
+    if let Some(filter) = filter {
+        args.push(filter.to_owned());
+    }
+
+    println!("\n==> Running in sandbox (logs: {log_dir})...");
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_command("docker", &borrowed)?;
+    Ok(())
+}
+
+/// `uid:gid` of the user running xtask, so the root sandbox can hand its logs back.
+fn invoking_owner() -> Result<String> {
+    let id = |flag: &str| -> Result<String> {
+        let output = Command::new("id")
+            .arg(flag)
+            .output()
+            .with_context(|| format!("Failed to run id {flag}"))?;
+        if !output.status.success() {
+            anyhow::bail!("id {flag} failed with {}", output.status);
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+    Ok(format!("{}:{}", id("-u")?, id("-g")?))
+}
+
+/// Compile the library unit tests and the e2e crate, returning both executables.
+fn build_test_binaries() -> Result<(String, String)> {
+    let output = Command::new("cargo")
+        .args([
+            "test",
+            "--lib",
+            "--test",
+            "e2e",
+            "--no-run",
+            "--message-format=json-render-diagnostics",
+        ])
+        .current_dir(project_root())
+        .stderr(Stdio::inherit())
+        .output()
+        .context("Failed to run cargo test --no-run")?;
+    if !output.status.success() {
+        anyhow::bail!("building the test binaries failed with {}", output.status);
+    }
+
+    let mut unit = None;
+    let mut e2e = None;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let message: CargoMessage = serde_json::from_str(line)
+            .with_context(|| format!("cargo printed a non-JSON message: {line}"))?;
+        let (Some(target), Some(executable)) = (message.target, message.executable) else {
+            continue;
+        };
+        if target.kind.iter().any(|kind| kind == "test") && target.name == "e2e" {
+            e2e = Some(executable);
+        } else if target.kind.iter().any(|kind| kind == "lib") && target.name == "harborshield" {
+            unit = Some(executable);
+        }
+    }
+    Ok((
+        unit.context("cargo reported no unit test executable")?,
+        e2e.context("cargo reported no e2e executable")?,
+    ))
+}
+
+/// The fields of a cargo JSON message needed to find test executables; other message kinds and
+/// fields are ignored on purpose.
+#[derive(serde::Deserialize)]
+struct CargoMessage {
+    target: Option<CargoTarget>,
+    executable: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct CargoTarget {
+    name: String,
+    kind: Vec<String>,
 }
 
 fn cmd_check(fix: bool) -> Result<()> {
@@ -237,10 +428,13 @@ fn cmd_restart() -> Result<()> {
     println!("Restarting dev container...\n");
 
     println!("==> Stopping...");
-    let _ = run_command_silent(
+    // Nothing to stop is fine; the rebuild below reports any real problem.
+    if let Err(failure) = run_command_silent(
         "docker",
         &["compose", "-f", "docker-compose.dev.yml", "down"],
-    );
+    ) {
+        println!("    (stop skipped: {failure})");
+    }
 
     println!("==> Rebuilding and starting...");
     run_command(
@@ -270,8 +464,12 @@ fn cmd_clean(volumes: bool) -> Result<()> {
     }
     run_command("docker", &args)?;
 
-    // Also clean up any orphaned harborshield containers
-    let _ = run_command_silent("docker", &["rm", "-f", "harborshield-dev", "test-nginx"]);
+    // Also clean up any orphaned harborshield containers; absent ones are fine.
+    match run_command_silent("docker", &["rm", "-f", "harborshield-dev", "test-nginx"]) {
+        Ok(status) if !status.success() => println!("    (no orphaned containers to remove)"),
+        Ok(_) => {}
+        Err(failure) => println!("    (orphan cleanup skipped: {failure})"),
+    }
 
     println!("Cleanup complete.");
     Ok(())
@@ -311,14 +509,22 @@ Host harborshield-dev
     fs::create_dir_all(&ssh_dir).context("Failed to create .ssh directory")?;
 
     // Check if entry already exists
-    let entry_exists = if let Ok(file) = fs::File::open(&ssh_config_path) {
-        let reader = BufReader::new(file);
-        reader.lines().any(|line| {
-            line.map(|l| l.contains("Host harborshield-dev"))
-                .unwrap_or(false)
-        })
-    } else {
-        false
+    let entry_exists = match fs::File::open(&ssh_config_path) {
+        Ok(file) => {
+            let mut found = false;
+            for line in BufReader::new(file).lines() {
+                let line = line.with_context(|| format!("Failed to read {ssh_config_path}"))?;
+                if line.contains("Host harborshield-dev") {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        }
+        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => false,
+        Err(failure) => {
+            return Err(failure).with_context(|| format!("Failed to open {ssh_config_path}"));
+        }
     };
 
     if entry_exists {

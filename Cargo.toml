@@ -24,9 +24,11 @@ resolver = "3"
 #   Enter "harborshield-dev", password "dev", open folder "/app"
 #
 # Testing:
-#   cargo xtask test             Run all tests
+#   cargo xtask test             Run the unprivileged tests
 #   cargo xtask test --unit      Run only unit tests
-#   cargo xtask test --ignored   Run integration tests
+#   cargo xtask e2e              Run the e2e suite and privileged unit tests in a
+#                                Docker-in-Docker sandbox (never on the host)
+#   cargo xtask e2e <filter>     Run only e2e tests matching <filter>
 #
 # Code Quality:
 #   cargo xtask check            Run fmt check, clippy, tests
@@ -136,7 +138,6 @@ libc = "0.2.191"
 [dev-dependencies]
 tempfile = "3.27.0"
 uuid = { version = "1.29.2", features = ["v4"] }
-compose_spec = "0.3.0"
 nix = { version = "0.32.0", features = ["process", "sched", "signal"] }
 temp-env = { version = "0.3.6", features = ["async_closure"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["json"] }

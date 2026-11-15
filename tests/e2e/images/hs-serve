@@ -1,0 +1,42 @@
+#!/bin/sh
+# Serve a banner on each requested port so a probe can prove which service answered.
+# Usage: hs-serve tcp:8080 udp:5353 ...
+set -eu
+
+if [ "$#" -eq 0 ]; then
+    echo "usage: hs-serve proto:port..." >&2
+    exit 64
+fi
+
+name=${HS_NAME:-$(hostname)}
+
+# Docker disables IPv6 inside containers that sit on no IPv6 network.
+ipv6=no
+if [ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null)" = "0" ]; then
+    ipv6=yes
+fi
+
+for spec in "$@"; do
+    proto=${spec%%:*}
+    port=${spec#*:}
+    case "$proto" in
+        tcp)
+            socat "TCP4-LISTEN:$port,reuseaddr,fork" "SYSTEM:echo hs-e2e $name $port" &
+            if [ "$ipv6" = yes ]; then
+                socat "TCP6-LISTEN:$port,reuseaddr,fork,ipv6only=1" "SYSTEM:echo hs-e2e $name $port" &
+            fi
+            ;;
+        udp)
+            socat "UDP4-RECVFROM:$port,reuseaddr,fork" "SYSTEM:echo hs-e2e $name $port" &
+            if [ "$ipv6" = yes ]; then
+                socat "UDP6-RECVFROM:$port,reuseaddr,fork,ipv6only=1" "SYSTEM:echo hs-e2e $name $port" &
+            fi
+            ;;
+        *)
+            echo "hs-serve: unknown protocol '$proto' in '$spec'" >&2
+            exit 64
+            ;;
+    esac
+done
+
+wait
