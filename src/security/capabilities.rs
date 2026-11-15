@@ -3,150 +3,98 @@ use tracing::{debug, warn};
 
 use super::{Result, SecurityError};
 
-/// Check if the current process has the required capabilities
+/// Fail unless CAP_NET_ADMIN is both permitted and effective.
 pub fn check_required_capabilities() -> Result<()> {
-    debug!("Checking for required capabilities");
-
-    // Check for CAP_NET_ADMIN capability
-    if let Err(e) = check_capability(Capability::CAP_NET_ADMIN) {
-        // Log current capabilities for debugging
-        if let Ok(cap_list) = list_current_capabilities() {
-            warn!("Current process capabilities:\n{}", cap_list);
-        }
-        return Err(e);
+    if let Err(failure) = check_capability(Capability::CAP_NET_ADMIN) {
+        warn!("current process capabilities:\n{}", describe_capabilities());
+        return Err(failure);
     }
-
-    debug!("All required capabilities are present");
+    debug!("all required capabilities are present");
     Ok(())
 }
 
-/// Check if a specific capability is available in both permitted and effective sets
-fn check_capability(cap: Capability) -> Result<()> {
-    let cap_name = format!("{:?}", cap);
-
-    // Check if the capability is in the permitted set
-    let has_permitted = caps::has_cap(None, CapSet::Permitted, cap).map_err(|e| {
-        SecurityError::CapabilityCheck {
-            capability: cap_name.clone(),
-            message: format!("Failed to check permitted capabilities: {}", e),
+fn check_capability(capability: Capability) -> Result<()> {
+    for (set, set_name, remediation) in [
+        (
+            CapSet::Permitted,
+            "permitted",
+            "Grant it with `sudo setcap 'cap_net_admin=+ep' /path/to/harborshield`, or run as root.",
+        ),
+        (
+            CapSet::Effective,
+            "effective",
+            "It is permitted but not effective; keep it effective when dropping privileges.",
+        ),
+    ] {
+        let present = caps::has_cap(None, set, capability).map_err(|source| {
+            SecurityError::CapabilityCheck {
+                set: set_name,
+                source,
+            }
+        })?;
+        if !present {
+            return Err(SecurityError::MissingCapability {
+                capability: format!("{capability:?}"),
+                set: set_name,
+                remediation,
+            });
         }
-    })?;
-
-    if !has_permitted {
-        return Err(SecurityError::MissingCapability {
-            capability: cap_name.clone(),
-            capability_set: "Permitted".to_string(),
-            remediation: format!(
-                "Grant the capability using: sudo setcap 'cap_net_admin=+ep' /path/to/harborshield\n\
-                 Or run with appropriate privileges (e.g., as root or with sudo)"
-            ),
-        });
     }
-
-    // Check if the capability is in the effective set
-    let has_effective = caps::has_cap(None, CapSet::Effective, cap).map_err(|e| {
-        SecurityError::CapabilityCheck {
-            capability: cap_name.clone(),
-            message: format!("Failed to check effective capabilities: {}", e),
-        }
-    })?;
-
-    if !has_effective {
-        return Err(SecurityError::MissingCapability {
-            capability: cap_name.clone(),
-            capability_set: "Effective".to_string(),
-            remediation: format!(
-                "The capability is in the permitted set but not in the effective set.\n\
-                 This might be due to the process dropping privileges.\n\
-                 Ensure the capability is preserved when dropping privileges."
-            ),
-        });
-    }
-
-    debug!(
-        "Capability {} is present in both permitted and effective sets",
-        cap_name
-    );
     Ok(())
 }
 
-/// Get a human-readable list of all current capabilities
-pub fn list_current_capabilities() -> Result<String> {
-    let mut output = String::new();
-
-    // List all capability sets
-    let sets = [
+/// The process's capability sets, for diagnosing a failed check.
+pub fn describe_capabilities() -> String {
+    [
         ("Permitted", CapSet::Permitted),
         ("Effective", CapSet::Effective),
         ("Inheritable", CapSet::Inheritable),
-    ];
-
-    for (name, set) in &sets {
-        match caps::read(None, *set) {
-            Ok(caps) => {
-                output.push_str(&format!("{} capabilities: ", name));
-                if caps.is_empty() {
-                    output.push_str("(none)");
-                } else {
-                    let cap_names: Vec<String> = caps.iter().map(|c| format!("{:?}", c)).collect();
-                    output.push_str(&cap_names.join(", "));
-                }
-                output.push('\n');
-            }
-            Err(e) => {
-                output.push_str(&format!("{} capabilities: (error reading: {})\n", name, e));
-            }
+    ]
+    .iter()
+    .map(|(name, set)| match caps::read(None, *set) {
+        Ok(held) if held.is_empty() => format!("{name} capabilities: (none)"),
+        Ok(held) => {
+            let names: Vec<String> = held
+                .iter()
+                .map(|capability| format!("{capability:?}"))
+                .collect();
+            format!("{name} capabilities: {}", names.join(", "))
         }
-    }
-
-    Ok(output)
+        Err(failure) => format!("{name} capabilities: (could not read: {failure})"),
+    })
+    .collect::<Vec<_>>()
+    .join("\n")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{SecurityError, check_required_capabilities, describe_capabilities};
 
     #[test]
-    fn test_list_current_capabilities_returns_ok() {
-        // This test verifies that list_current_capabilities can be called
-        // and returns a valid result (the content depends on the execution context)
-        let result = list_current_capabilities();
-        assert!(result.is_ok());
-        let output = result.unwrap();
-        // The output should contain the capability set names
-        assert!(output.contains("Permitted capabilities:"));
-        assert!(output.contains("Effective capabilities:"));
-        assert!(output.contains("Inheritable capabilities:"));
+    fn describes_each_capability_set() {
+        let description = describe_capabilities();
+        for set in ["Permitted", "Effective", "Inheritable"] {
+            assert!(
+                description.contains(&format!("{set} capabilities:")),
+                "{description}"
+            );
+        }
     }
 
     #[test]
-    fn test_list_current_capabilities_format() {
-        let result = list_current_capabilities().unwrap();
-        // Should have newlines between each capability set
-        let lines: Vec<&str> = result.lines().collect();
-        assert!(lines.len() >= 3);
+    #[ignore = "requires root or CAP_NET_ADMIN; runs in the e2e sandbox"]
+    fn passes_with_cap_net_admin() {
+        check_required_capabilities().expect("CAP_NET_ADMIN is held");
     }
 
     #[test]
-    #[ignore = "Requires root or CAP_NET_ADMIN capability"]
-    fn test_check_required_capabilities_with_cap_net_admin() {
-        // This test only passes when run with CAP_NET_ADMIN
-        let result = check_required_capabilities();
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_check_required_capabilities_error_type() {
-        // When running without CAP_NET_ADMIN, we should get a MissingCapability error
-        // or a CapabilityCheck error if we can't read capabilities at all
-        let result = check_required_capabilities();
-        if result.is_err() {
-            let err = result.unwrap_err();
+    fn a_failed_check_names_what_is_missing() {
+        // Unprivileged runs must fail with a capability error; privileged runs pass.
+        if let Err(failure) = check_required_capabilities() {
             assert!(matches!(
-                err,
+                failure,
                 SecurityError::MissingCapability { .. } | SecurityError::CapabilityCheck { .. }
             ));
         }
-        // If it succeeds, the test is running with elevated privileges
     }
 }

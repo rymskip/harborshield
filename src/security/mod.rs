@@ -1,45 +1,24 @@
-#[cfg(target_os = "linux")]
+//! Process hardening: a capability check, a landlock filesystem sandbox and a seccomp syscall
+//! denylist.
+
 pub mod capabilities;
-#[cfg(target_os = "linux")]
+pub mod error;
 pub mod landlock;
-#[cfg(target_os = "linux")]
 pub mod seccomp;
 
-pub mod error;
-
-pub use error::{Result, SecurityError};
 use std::path::Path;
 
-/// Check if the process has all required capabilities
+pub use error::{Result, SecurityError};
+
+/// Fail unless the process holds the capabilities harborshield needs.
 pub fn check_capabilities() -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        capabilities::check_required_capabilities()?;
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        tracing::debug!("Capability checking is only available on Linux");
-    }
-
-    Ok(())
+    capabilities::check_required_capabilities()
 }
 
-pub fn apply_restrictions(db_path: &Path, log_path: Option<&Path>) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        // Apply landlock restrictions
-        landlock::apply_landlock_rules(db_path, log_path)?;
-
-        // Apply seccomp filters
-        seccomp::apply_seccomp_filters()?;
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        tracing::warn!("Security restrictions are only available on Linux");
-        let _ = (db_path, log_path); // Avoid unused variable warnings
-    }
-
-    Ok(())
+/// Confine the process: a filesystem sandbox, then a syscall denylist. Call this before any
+/// other thread starts, since the filesystem sandbox only covers the calling thread and the
+/// threads and processes it starts afterwards.
+pub fn apply_restrictions(data_dir: &Path, log_path: Option<&Path>) -> Result<()> {
+    landlock::apply_landlock_rules(data_dir, log_path)?;
+    seccomp::apply_seccomp_filters()
 }
