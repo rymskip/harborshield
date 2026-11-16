@@ -57,6 +57,7 @@ fn managed(container: &Container, all: &[Container]) -> ManagedContainer {
         id: container.id.clone(),
         name: container.name.clone(),
         addresses: addresses.into_iter().collect(),
+        gateways: gateways.iter().copied().collect(),
         published,
         localhost,
         external,

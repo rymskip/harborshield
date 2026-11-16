@@ -17,6 +17,8 @@ use nftables::stmt::{
 };
 use nftables::types::{NfFamily, NfHook};
 
+use ipnet::{IpNet, Ipv4Net};
+
 use crate::docker::config::{AddrOrRange, Protocol, RulePorts};
 
 /// Name of harborshield's tables; it never writes into tables other software manages.
@@ -172,6 +174,9 @@ pub struct ManagedContainer {
     pub id: String,
     pub name: String,
     pub addresses: Vec<IpAddr>,
+    /// The Docker host's own addresses as seen by this container: its networks' gateways.
+    /// Traffic from these, or from loopback, is never external.
+    pub gateways: Vec<IpAddr>,
     pub published: Vec<PublishedPort>,
     pub localhost: Option<LocalAccess>,
     pub external: Option<ExternalAccess>,
@@ -217,6 +222,19 @@ pub fn container_rules(layer: Layer, container: &ManagedContainer) -> Vec<Rule<'
         ct_match("state", established_or_related()),
         Statement::Accept(None),
     ]);
+    // IPv6 resolves neighbours over ICMPv6, which conntrack does not track; without this the
+    // host and peers can never reach a managed container over IPv6, as ARP is to IPv4.
+    bodies.push(vec![
+        Statement::Match(Match {
+            left: payload("icmpv6", "type"),
+            right: Expression::Named(NamedExpression::Set(vec![
+                SetItem::Element(Expression::String(Cow::Borrowed("nd-neighbor-solicit"))),
+                SetItem::Element(Expression::String(Cow::Borrowed("nd-neighbor-advert"))),
+            ])),
+            op: Operator::EQ,
+        }),
+        Statement::Accept(None),
+    ]);
     bodies.extend(grants.iter().map(Grant::new_connection_rule));
 
     let short_id = container.id.get(..12).unwrap_or(&container.id);
@@ -246,6 +264,8 @@ struct Grant {
     family: Family,
     role: Role,
     initiator: Option<Vec<Expression<'static>>>,
+    /// Initiator addresses excluded even when `initiator` admits any.
+    initiator_excluded: Option<Vec<Expression<'static>>>,
     responder: Option<Vec<Expression<'static>>>,
     proto: Protocol,
     initiator_ports: Vec<RulePorts>,
@@ -316,6 +336,14 @@ impl Grant {
         if let Some(addresses) = source {
             body.push(address_match(self.family, "saddr", addresses.clone()));
         }
+        if let Some(excluded) = &self.initiator_excluded {
+            let field = if reply { "daddr" } else { "saddr" };
+            body.push(Statement::Match(Match {
+                left: payload(self.family.payload(), field),
+                right: set_or_single(excluded.clone()),
+                op: Operator::NEQ,
+            }));
+        }
         if let Some(addresses) = destination {
             body.push(address_match(self.family, "daddr", addresses.clone()));
         }
@@ -341,7 +369,8 @@ fn grants(container: &ManagedContainer) -> Vec<Grant> {
             grants.extend(localhost_grants(family, &own, local, &published));
         }
         if let Some(external) = &container.external {
-            grants.extend(external_grants(family, &own, external, &published));
+            let local = local_sources(family, &container.gateways);
+            grants.extend(external_grants(family, &own, &local, external, &published));
         }
         grants.extend(
             container
@@ -376,6 +405,7 @@ fn localhost_grants(
             family,
             role: Role::Responder,
             initiator: Some(sources.clone()),
+            initiator_excluded: None,
             responder: Some(own.to_vec()),
             proto: *proto,
             initiator_ports: Vec::new(),
@@ -387,9 +417,29 @@ fn localhost_grants(
         .collect()
 }
 
+/// Loopback and the gateways in `family`: the Docker host itself.
+fn local_sources(family: Family, gateways: &[IpAddr]) -> Vec<Expression<'static>> {
+    let loopback = match family {
+        Family::V4 => AddrOrRange::Net(IpNet::V4(Ipv4Net::new_assert(
+            std::net::Ipv4Addr::new(127, 0, 0, 0),
+            8,
+        ))),
+        Family::V6 => AddrOrRange::Addr(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)),
+    };
+    std::iter::once(entry_expr(&loopback))
+        .chain(
+            gateways
+                .iter()
+                .filter(|gateway| Family::of(gateway) == family)
+                .map(address_expr),
+        )
+        .collect()
+}
+
 fn external_grants(
     family: Family,
     own: &[Expression<'static>],
+    excluded: &[Expression<'static>],
     external: &ExternalAccess,
     published: &PortsByProto,
 ) -> Vec<Grant> {
@@ -398,13 +448,16 @@ fn external_grants(
         PeerMatch::Only(addresses) => Some(addresses),
         PeerMatch::Nothing => return Vec::new(),
     };
-    // Only traffic that arrived through a port mapping counts as external.
+    // Only traffic that arrived through a port mapping, and not from the Docker host itself,
+    // counts as external. Without docker-proxy, localhost connections are DNATed too.
+    let excluded = excluded.to_vec();
     published
         .values()
         .map(|(proto, ports)| Grant {
             family,
             role: Role::Responder,
             initiator: sources.clone(),
+            initiator_excluded: Some(excluded.clone()),
             responder: Some(own.to_vec()),
             proto: *proto,
             initiator_ports: Vec::new(),
@@ -426,6 +479,7 @@ fn output_grant(family: Family, own: &[Expression<'static>], output: &OutputRule
         family,
         role: Role::Initiator,
         initiator: Some(own.to_vec()),
+        initiator_excluded: None,
         responder: destinations,
         proto: output.proto,
         initiator_ports: output.src_ports.clone(),
@@ -690,6 +744,7 @@ mod tests {
             id: "0123456789abcdef".to_owned(),
             name: "web".to_owned(),
             addresses,
+            gateways: vec![GATEWAY],
             published: vec![PublishedPort {
                 port: 8080,
                 proto: Protocol::Tcp,
@@ -733,7 +788,14 @@ mod tests {
     #[test]
     fn a_container_without_grants_accepts_replies_and_drops_the_rest() {
         let rules = rendered(&container_rules(&bare(vec![V4])));
-        assert_eq!(rules.len(), 2);
+        assert_eq!(rules.len(), 3);
+        assert!(
+            rules
+                .get(1)
+                .expect("neighbour discovery rule")
+                .to_string()
+                .contains("nd-neighbor-advert")
+        );
         let first = rules.first().expect("established rule");
         assert!(contains(first, &json!({"accept": null})));
         assert!(first.to_string().contains("established"));
@@ -754,7 +816,7 @@ mod tests {
             verdict: Verdict::Accept,
         });
         let rules = rendered(&container_rules(&container));
-        let grant = rules.get(1).expect("grant after the established rule");
+        let grant = rules.get(2).expect("grant after the established rule");
         assert!(contains(
             grant,
             &json!({"match": {"op": "in", "left": {"ct": {"key": "status"}}, "right": "dnat"}})
@@ -775,6 +837,23 @@ mod tests {
     }
 
     #[test]
+    fn external_grants_never_admit_the_docker_host_itself() {
+        let mut container = bare(vec![V4]);
+        container.external = Some(ExternalAccess {
+            sources: Peers::Any,
+            log_prefix: None,
+            verdict: Verdict::Accept,
+        });
+        let rules = rendered(&container_rules(&container));
+        let grant = rules.get(2).expect("grant");
+        assert!(contains(
+            grant,
+            &json!({"match": {"op": "!=", "left": {"payload": {"protocol": "ip", "field": "saddr"}},
+                "right": {"set": [{"prefix": {"addr": "127.0.0.0", "len": 8}}, "172.18.0.1"]}}})
+        ));
+    }
+
+    #[test]
     fn localhost_grants_admit_the_listed_sources_without_a_port_mapping() {
         let mut container = bare(vec![V4]);
         container.localhost = Some(LocalAccess {
@@ -783,7 +862,7 @@ mod tests {
             verdict: Verdict::Accept,
         });
         let rules = rendered(&container_rules(&container));
-        let grant = rules.get(1).expect("grant");
+        let grant = rules.get(2).expect("grant");
         assert!(!grant.to_string().contains("dnat"));
         assert!(grant.to_string().contains("172.18.0.1"));
         assert!(grant.to_string().contains("127.0.0.1"));
@@ -802,14 +881,14 @@ mod tests {
             verdict: Verdict::Accept,
         });
         // The allowlist names only an IPv6 source and the container has only IPv4: no grant.
-        assert_eq!(container_rules(&container).len(), 2);
+        assert_eq!(container_rules(&container).len(), 3);
 
         container.addresses.push(V6);
         let rules = rendered(&container_rules(&container));
-        assert_eq!(rules.len(), 3);
+        assert_eq!(rules.len(), 4);
         assert!(
             rules
-                .get(1)
+                .get(2)
                 .expect("v6 grant")
                 .to_string()
                 .contains("\"ip6\"")
@@ -828,7 +907,7 @@ mod tests {
             verdict: Verdict::Jump("audit".to_owned()),
         });
         let rules = rendered(&container_rules(&container));
-        let grant = rules.get(1).expect("grant");
+        let grant = rules.get(2).expect("grant");
         assert!(!grant.to_string().contains("daddr"));
         assert!(grant.to_string().contains("\"saddr\""));
         assert!(grant.to_string().contains("\"range\":[5000,5010]"));
@@ -853,8 +932,9 @@ mod tests {
             },
         });
         let rules = rendered(&container_rules(&container));
-        // inbound established, outbound established, established accept, new grant, drop
-        assert_eq!(rules.len(), 5);
+        // inbound established, outbound established, established accept, neighbour discovery,
+        // new grant, drop
+        assert_eq!(rules.len(), 6);
         let inbound = rules.first().expect("inbound queue rule");
         let outbound = rules.get(1).expect("outbound queue rule");
         assert!(contains(
@@ -872,7 +952,7 @@ mod tests {
         ));
         assert_eq!(verdict_of(outbound), Some(&json!({"queue": {"num": 12}})));
         assert_eq!(
-            verdict_of(rules.get(3).expect("new grant")),
+            verdict_of(rules.get(4).expect("new grant")),
             Some(&json!({"queue": {"num": 10}}))
         );
     }

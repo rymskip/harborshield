@@ -194,6 +194,7 @@ mod tests {
             id: id.to_owned(),
             name: name.to_owned(),
             addresses: vec![IpAddr::V4(Ipv4Addr::new(172, 18, 0, last_octet))],
+            gateways: Vec::new(),
             published: Vec::new(),
             localhost: None,
             external: None,
