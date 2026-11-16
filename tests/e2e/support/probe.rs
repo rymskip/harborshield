@@ -1,5 +1,5 @@
 use std::fmt;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::time::Duration;
 
 use super::command::run;
@@ -37,8 +37,10 @@ pub enum Origin<'a> {
     /// The simulated outside machine, from one of its source addresses.
     External {
         sandbox: &'a Sandbox,
-        source: Ipv4Addr,
+        source: IpAddr,
     },
+    /// A network namespace a test created, outside Docker.
+    Namespace(&'a str),
 }
 
 impl fmt::Display for Origin<'_> {
@@ -47,6 +49,7 @@ impl fmt::Display for Origin<'_> {
             Self::Container(name) => write!(formatter, "container {name}"),
             Self::Localhost => formatter.write_str("localhost"),
             Self::External { source, .. } => write!(formatter, "external host {source}"),
+            Self::Namespace(name) => write!(formatter, "namespace {name}"),
         }
     }
 }
@@ -81,6 +84,22 @@ pub async fn probe(
             .await?
         }
         Origin::Localhost => run("hs-probe", &[proto.as_str(), &host, &port], PROBE_LIMIT).await?,
+        Origin::Namespace(name) => {
+            run(
+                "ip",
+                &[
+                    "netns",
+                    "exec",
+                    name,
+                    "hs-probe",
+                    proto.as_str(),
+                    &host,
+                    &port,
+                ],
+                PROBE_LIMIT,
+            )
+            .await?
+        }
         Origin::External { sandbox, source } => {
             let source = source.to_string();
             run(

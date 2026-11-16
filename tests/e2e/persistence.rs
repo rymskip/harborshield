@@ -77,7 +77,7 @@ e2e! {
         tcp(Origin::Container(&intruder.name), server_ip, 8080)
             .expect_dropped()
             .await?;
-        tcp(Origin::External { sandbox: &sandbox, source: sandbox.external_addr }, sandbox.host_addr, 18080)
+        tcp(Origin::External { sandbox: &sandbox, source: sandbox.external_addr.into() }, sandbox.host_addr, 18080)
             .expect_connected(&server.name, 8080)
             .await
     }

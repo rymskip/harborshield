@@ -4,11 +4,14 @@
 
 mod support;
 
+mod coexistence;
 mod compose;
 mod isolation;
 mod lifecycle;
 mod mapped_ports;
 mod output_rules;
 mod persistence;
+mod scale;
 mod startup;
+mod upgrade;
 mod verdicts;

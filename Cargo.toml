@@ -71,6 +71,7 @@ allow_attributes = "deny"
 #   cargo xtask e2e              Run the e2e suite and privileged unit tests in a
 #                                Docker-in-Docker sandbox (never on the host)
 #   cargo xtask e2e <filter>     Run only e2e tests matching <filter>
+#   cargo xtask e2e --matrix     Run under every Docker firewall backend and proxy mode
 #
 # Code Quality:
 #   cargo xtask check            Run fmt check, clippy, tests
@@ -186,3 +187,4 @@ uuid = { version = "1.29.2", features = ["v4"] }
 nix = { version = "0.32.0", features = ["process", "sched", "signal"] }
 temp-env = { version = "0.3.6", features = ["async_closure"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["json"] }
+nfq = "0.2.6"

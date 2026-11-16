@@ -23,19 +23,61 @@ pub struct Ruleset {
     objects: Vec<NfListObject<'static>>,
 }
 
+/// Read the tables the suite inspects: harborshield's, Docker's `ip filter` (for the legacy
+/// layout) and the tests' own. Other software's tables are listed but not parsed: Docker's
+/// nftables backend uses named verdict maps the nftables crate cannot represent.
 pub async fn ruleset() -> TestResult<Ruleset> {
-    let raw = run_ok("nft", &["--json", "list", "ruleset"], NFT_LIMIT).await?;
-    let document: Nftables<'static> =
-        serde_json::from_str(&raw).map_err(|error| Failure::context("parse nft ruleset", error))?;
-    let objects = document
+    let mut objects = list(&["list", "tables"]).await?;
+    let inspected: Vec<(NfFamily, String)> = objects
+        .iter()
+        .filter_map(|object| match object {
+            NfListObject::Table(table)
+                if table.name == TABLE
+                    || table.name.starts_with("e2e_")
+                    || (table.family == NfFamily::IP && table.name == "filter") =>
+            {
+                Some((table.family, table.name.to_string()))
+            }
+            _ => None,
+        })
+        .collect();
+    for (family, name) in inspected {
+        objects.extend(
+            list(&["list", "table", family_keyword(family), &name])
+                .await?
+                .into_iter()
+                .filter(|object| !matches!(object, NfListObject::Table(_))),
+        );
+    }
+    Ok(Ruleset { objects })
+}
+
+async fn list(args: &[&str]) -> TestResult<Vec<NfListObject<'static>>> {
+    let mut command = vec!["--json"];
+    command.extend_from_slice(args);
+    let raw = run_ok("nft", &command, NFT_LIMIT).await?;
+    let document: Nftables<'static> = serde_json::from_str(&raw)
+        .map_err(|error| Failure::context(format!("parse `nft {}`", args.join(" ")), error))?;
+    Ok(document
         .objects
         .iter()
         .filter_map(|object| match object {
             NfObject::ListObject(item) => Some(item.clone()),
             NfObject::CmdObject(_) => None,
         })
-        .collect();
-    Ok(Ruleset { objects })
+        .collect())
+}
+
+/// The keyword nft uses for a table family.
+pub fn family_keyword(family: NfFamily) -> &'static str {
+    match family {
+        NfFamily::INet => "inet",
+        NfFamily::Bridge => "bridge",
+        NfFamily::IP => "ip",
+        NfFamily::IP6 => "ip6",
+        NfFamily::ARP => "arp",
+        NfFamily::NetDev => "netdev",
+    }
 }
 
 /// Run an nft command for fixture setup, such as creating a user verdict chain.
@@ -86,6 +128,43 @@ impl Ruleset {
             }
             _ => None,
         })
+    }
+
+    /// Families and names of tables whose name starts with `prefix`.
+    pub fn tables_named_with_prefix(&self, prefix: &str) -> Vec<(NfFamily, String)> {
+        self.objects
+            .iter()
+            .filter_map(|object| match object {
+                NfListObject::Table(table) if table.name.starts_with(prefix) => {
+                    Some((table.family, table.name.to_string()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether a table exists, by family and name.
+    pub fn has_table(&self, family: NfFamily, name: &str) -> bool {
+        self.objects.iter().any(|object| {
+            matches!(object, NfListObject::Table(table) if table.family == family && table.name == name)
+        })
+    }
+
+    /// Per-container chains versions before the dedicated table left in `ip filter`.
+    pub fn legacy_container_chains(&self) -> Vec<String> {
+        self.objects
+            .iter()
+            .filter_map(|object| match object {
+                NfListObject::Chain(chain)
+                    if chain.family == NfFamily::IP
+                        && chain.table == "filter"
+                        && chain.name.starts_with("hs-") =>
+                {
+                    Some(chain.name.to_string())
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Whether `ip filter` holds a chain by this name, as versions before the dedicated table

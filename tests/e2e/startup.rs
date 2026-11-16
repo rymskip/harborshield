@@ -69,6 +69,7 @@ e2e! {
     /// Versions before the dedicated table jumped from Docker's chains into their own chain in
     /// `ip filter`; starting must remove all of it, leaving Docker's chains intact.
     async fn start_removes_objects_left_by_the_legacy_layout(scenario) {
+        crate::support::ensure_ip_filter_table(scenario).await?;
         nft(&["add", "chain", "ip", "filter", "harborshield"]).await?;
         nft(&["add", "chain", "ip", "filter", "hs-legacy-0123456789ab"]).await?;
         nft(&["add", "rule", "ip", "filter", "harborshield", "jump", "hs-legacy-0123456789ab"]).await?;

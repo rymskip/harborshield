@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Query macros check against the committed .sqlx cache.
+  SQLX_OFFLINE: "true"
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: rui314/setup-mold@v1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --all-features
+
+  e2e:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [iptables, nftables]
+        proxy: [proxy, no-proxy]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The upgrade test builds the previous release from history.
+          fetch-depth: 0
+      - uses: rui314/setup-mold@v1
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: End-to-end suite (${{ matrix.backend }}, ${{ matrix.proxy }})
+        run: >-
+          cargo xtask e2e --backend ${{ matrix.backend }}
+          ${{ matrix.proxy == 'no-proxy' && '--no-userland-proxy' || '' }}
+      - name: Keep the sandbox logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs-${{ matrix.backend }}-${{ matrix.proxy }}
+          path: target/e2e/logs

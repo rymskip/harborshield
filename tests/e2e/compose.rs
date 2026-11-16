@@ -75,7 +75,7 @@ e2e! {
         let app_ip = app.ip_on(&backend).await?;
         let db_ip = db.ip_on(&backend).await?;
 
-        tcp(Origin::External { sandbox: &sandbox, source: sandbox.external_addr }, sandbox.host_addr, 18090)
+        tcp(Origin::External { sandbox: &sandbox, source: sandbox.external_addr.into() }, sandbox.host_addr, 18090)
             .expect_connected("web", 8080)
             .await?;
         tcp(Origin::Container(&web.name), app_ip, 8081).expect_connected("app", 8081).await?;

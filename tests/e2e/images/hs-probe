@@ -22,7 +22,10 @@ case "$host" in
 esac
 bind=""
 if [ "$#" -ge 4 ]; then
-    bind=",bind=$4"
+    case "$4" in
+        *:*) bind=",bind=[$4]" ;;
+        *) bind=",bind=$4" ;;
+    esac
 fi
 
 case "$proto" in

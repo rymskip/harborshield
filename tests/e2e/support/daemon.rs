@@ -11,7 +11,8 @@ use super::command::run;
 use super::failure::{Failure, TestResult};
 use super::time::deadline_in;
 
-const BINARY: &str = env!("CARGO_BIN_EXE_harborshield");
+/// The harborshield this build produced.
+pub const CURRENT_BINARY: &str = env!("CARGO_BIN_EXE_harborshield");
 const READY_LIMIT: Duration = Duration::from_secs(60);
 /// The daemon allows its tasks 30 s to wind down; give it a margin on top.
 const STOP_LIMIT: Duration = Duration::from_secs(45);
@@ -27,7 +28,12 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    pub async fn start(data_dir: &Path, log_dir: &Path, generation: u32) -> TestResult<Self> {
+    pub async fn start(
+        binary: &Path,
+        data_dir: &Path,
+        log_dir: &Path,
+        generation: u32,
+    ) -> TestResult<Self> {
         let health = free_local_port()?;
         let stdout_log = log_dir.join(format!("harborshield-{generation}.stdout.log"));
         let stderr_log = log_dir.join(format!("harborshield-{generation}.stderr.log"));
@@ -36,7 +42,7 @@ impl Daemon {
         let stderr = std::fs::File::create(&stderr_log)
             .map_err(|error| Failure::context(format!("create {}", stderr_log.display()), error))?;
 
-        let child = Command::new(BINARY)
+        let child = Command::new(binary)
             .arg("--data-dir")
             .arg(data_dir)
             .arg("--debug")
@@ -46,7 +52,7 @@ impl Daemon {
             .stderr(Stdio::from(stderr))
             .kill_on_drop(true)
             .spawn()
-            .map_err(|error| Failure::context(format!("spawn {BINARY}"), error))?;
+            .map_err(|error| Failure::context(format!("spawn {}", binary.display()), error))?;
 
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
@@ -181,7 +187,12 @@ pub async fn clear(data_dir: &Path) -> TestResult {
     let data_dir = data_dir
         .to_str()
         .ok_or_else(|| Failure::new(format!("data dir {} is not UTF-8", data_dir.display())))?;
-    let output = run(BINARY, &["--clear", "--data-dir", data_dir], CLEAR_LIMIT).await?;
+    let output = run(
+        CURRENT_BINARY,
+        &["--clear", "--data-dir", data_dir],
+        CLEAR_LIMIT,
+    )
+    .await?;
     if output.status.success() {
         Ok(())
     } else {

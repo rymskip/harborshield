@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 
 use super::failure::{Failure, TestResult};
@@ -14,6 +14,9 @@ pub struct Sandbox {
     pub external_addr: Ipv4Addr,
     /// Second external source address that allowlists in the tests do not permit.
     pub foreign_addr: Ipv4Addr,
+    pub host_addr6: Ipv6Addr,
+    pub external_addr6: Ipv6Addr,
+    pub foreign_addr6: Ipv6Addr,
     pub log_root: PathBuf,
 }
 
@@ -31,6 +34,9 @@ impl Sandbox {
             external_netns: variable("HARBORSHIELD_E2E_EXT_NETNS")?,
             external_addr: address("HARBORSHIELD_E2E_EXT_ADDR")?,
             foreign_addr: address("HARBORSHIELD_E2E_EXT_FOREIGN_ADDR")?,
+            host_addr6: address("HARBORSHIELD_E2E_HOST_ADDR6")?,
+            external_addr6: address("HARBORSHIELD_E2E_EXT_ADDR6")?,
+            foreign_addr6: address("HARBORSHIELD_E2E_EXT_FOREIGN_ADDR6")?,
             log_root: PathBuf::from(variable("HARBORSHIELD_E2E_LOG_DIR")?),
         })
     }
@@ -40,7 +46,10 @@ fn variable(name: &str) -> TestResult<String> {
     std::env::var(name).map_err(|error| Failure::context(format!("sandbox variable {name}"), error))
 }
 
-fn address(name: &str) -> TestResult<Ipv4Addr> {
+fn address<Value: std::str::FromStr>(name: &str) -> TestResult<Value>
+where
+    Value::Err: std::fmt::Display,
+{
     let raw = variable(name)?;
     raw.parse()
         .map_err(|error| Failure::context(format!("sandbox variable {name}={raw}"), error))

@@ -7,7 +7,7 @@ use serde_json::json;
 
 use crate::support::{
     Container, ContainerSpec, Failure, Network, Origin, Scenario, TestResult, deadline_in, e2e,
-    ruleset, tcp,
+    restart_docker_daemon, ruleset, tcp,
 };
 
 /// A managed server and a managed client allowed to reach it on 8080.
@@ -145,7 +145,7 @@ e2e! {
 
         // The banner carries the hostname, which a rename does not change.
         let banner_name = scenario.name("server");
-        tcp(Origin::External { sandbox: &sandbox, source: sandbox.external_addr }, sandbox.host_addr, 18080)
+        tcp(Origin::External { sandbox: &sandbox, source: sandbox.external_addr.into() }, sandbox.host_addr, 18080)
             .expect_connected(&banner_name, 8080)
             .await?;
         tcp(Origin::Container(&intruder.name), server.ip_on(&net).await?, 8080)
@@ -175,5 +175,55 @@ e2e! {
 
         server.disconnect(&back).await?;
         scenario.wait_until_managed(&server).await.map(drop)
+    }
+}
+
+e2e! {
+    /// Docker restarting drops harborshield's event stream and restarts every container; the
+    /// daemon must resync, report ready again and enforce the rules on the new containers.
+    async fn enforcement_survives_a_docker_daemon_restart(scenario) {
+        let net = scenario.network("net").await?;
+        let server_name = scenario.name("server");
+        let server = scenario
+            .run(ContainerSpec::new(&server_name).network(&net).managed().restart_always())
+            .await?;
+        let rules = json!({
+            "output": [{ "container": server_name, "network": net.name, "proto": "tcp", "dst_ports": [8080] }]
+        });
+        let client = scenario
+            .run(ContainerSpec::new(scenario.name("client")).network(&net).rules(rules.to_string()).restart_always())
+            .await?;
+        let intruder = scenario
+            .run(ContainerSpec::new(scenario.name("intruder")).network(&net).restart_always())
+            .await?;
+        scenario.start_daemon().await?;
+        scenario.wait_until_managed(&server).await?;
+        scenario.wait_until_managed(&client).await?;
+
+        restart_docker_daemon().await?;
+        for container in [&server, &client, &intruder] {
+            container.wait_for_listeners(&[crate::support::Listener::Tcp(8080)]).await?;
+        }
+        let deadline = deadline_in(Duration::from_secs(90));
+        loop {
+            let (status, _) = scenario.daemon()?.get("/ready").await?;
+            if status == 200 {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Failure::new("harborshield never became ready again after Docker restarted"));
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        scenario.wait_until_managed(&server).await?;
+        scenario.wait_until_managed(&client).await?;
+
+        let server_ip = server.ip_on(&net).await?;
+        tcp(Origin::Container(&client.name), server_ip, 8080)
+            .expect_connected(&server_name, 8080)
+            .await?;
+        tcp(Origin::Container(&intruder.name), server_ip, 8080)
+            .expect_dropped_eventually()
+            .await
     }
 }

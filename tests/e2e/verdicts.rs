@@ -2,7 +2,9 @@
 
 use serde_json::json;
 
-use crate::support::{ContainerSpec, Failure, Origin, TABLE, e2e, nft, ruleset, tcp};
+use crate::support::{
+    ContainerSpec, Failure, Origin, QueueConsumer, TABLE, e2e, nft, ruleset, tcp,
+};
 
 const ACCEPT_CHAIN: &str = "e2e-verdict-accept";
 const DROP_CHAIN: &str = "e2e-verdict-drop";
@@ -33,7 +35,7 @@ e2e! {
         scenario.wait_until_managed(&open).await?;
         scenario.wait_until_managed(&shut).await?;
 
-        let outside = || Origin::External { sandbox: &sandbox, source: sandbox.external_addr };
+        let outside = || Origin::External { sandbox: &sandbox, source: sandbox.external_addr.into() };
         tcp(outside(), sandbox.host_addr, 18080)
             .expect_connected(&open.name, 8080)
             .await?;
@@ -67,7 +69,7 @@ e2e! {
         scenario.wait_until_managed(&shut).await?;
         scenario.wait_until_managed(&open).await?;
 
-        let outside = || Origin::External { sandbox: &sandbox, source: sandbox.external_addr };
+        let outside = || Origin::External { sandbox: &sandbox, source: sandbox.external_addr.into() };
         tcp(outside(), sandbox.host_addr, 18081)
             .expect_connected(&open.name, 8080)
             .await?;
@@ -96,7 +98,7 @@ e2e! {
                 return Err(Failure::new(format!("{chain} has no queue {expected} rule: {queues:?}")));
             }
         }
-        tcp(Origin::External { sandbox: &sandbox, source: sandbox.external_addr }, sandbox.host_addr, 18080)
+        tcp(Origin::External { sandbox: &sandbox, source: sandbox.external_addr.into() }, sandbox.host_addr, 18080)
             .expect_dropped()
             .await
     }
@@ -129,11 +131,41 @@ e2e! {
                 return Err(Failure::new(format!("{chain} lacks log prefix {expected}: {prefixes:?}")));
             }
         }
-        tcp(Origin::External { sandbox: &sandbox, source: sandbox.external_addr }, sandbox.host_addr, 18080)
+        tcp(Origin::External { sandbox: &sandbox, source: sandbox.external_addr.into() }, sandbox.host_addr, 18080)
             .expect_connected(&server.name, 8080)
             .await?;
         tcp(Origin::Container(&server.name), sandbox.external_addr, 7000)
             .expect_connected("external", 7000)
             .await
+    }
+}
+
+e2e! {
+    /// With a consumer on the queues, the connection works and each queue sees its share:
+    /// the opening packet, the inbound established packets and the outbound ones.
+    async fn established_queues_receive_each_direction(scenario) {
+        let net = scenario.network("net").await?;
+        let sandbox = scenario.sandbox.clone();
+        let rules = json!({ "mapped_ports": { "external": { "allow": true, "verdict": {
+            "queue": 110, "input_est_queue": 111, "output_est_queue": 112
+        } } } });
+        let server = scenario
+            .run(ContainerSpec::new(scenario.name("server")).network(&net).publish("18080:8080").rules(rules.to_string()))
+            .await?;
+        scenario.start_daemon().await?;
+        scenario.wait_until_managed(&server).await?;
+
+        let consumer = QueueConsumer::start(&[110, 111, 112])?;
+        let connected = tcp(Origin::External { sandbox: &sandbox, source: sandbox.external_addr.into() }, sandbox.host_addr, 18080)
+            .expect_connected(&server.name, 8080)
+            .await;
+        let counts = [110, 111, 112].map(|queue| (queue, consumer.count(queue)));
+        consumer.stop()?;
+        connected?;
+        if counts.iter().all(|(_, count)| *count > 0) {
+            Ok(())
+        } else {
+            Err(Failure::new(format!("a queue saw no packets: {counts:?}")))
+        }
     }
 }

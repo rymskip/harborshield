@@ -20,7 +20,7 @@ e2e! {
         tcp(Origin::Localhost, Ipv4Addr::LOCALHOST, 18080)
             .expect_connected(&server.name, 8080)
             .await?;
-        let outside = Origin::External { sandbox: &scenario.sandbox, source: scenario.sandbox.external_addr };
+        let outside = Origin::External { sandbox: &scenario.sandbox, source: scenario.sandbox.external_addr.into() };
         tcp(outside, scenario.sandbox.host_addr, 18080)
             .expect_dropped()
             .await
@@ -39,7 +39,7 @@ e2e! {
 
         let sandbox = scenario.sandbox.clone();
         for source in [sandbox.external_addr, sandbox.foreign_addr] {
-            tcp(Origin::External { sandbox: &sandbox, source }, sandbox.host_addr, 18080)
+            tcp(Origin::External { sandbox: &sandbox, source: source.into() }, sandbox.host_addr, 18080)
                 .expect_connected(&server.name, 8080)
                 .await?;
         }
@@ -62,10 +62,10 @@ e2e! {
         scenario.start_daemon().await?;
         scenario.wait_until_managed(&server).await?;
 
-        tcp(Origin::External { sandbox: &sandbox, source: sandbox.external_addr }, sandbox.host_addr, 18080)
+        tcp(Origin::External { sandbox: &sandbox, source: sandbox.external_addr.into() }, sandbox.host_addr, 18080)
             .expect_connected(&server.name, 8080)
             .await?;
-        tcp(Origin::External { sandbox: &sandbox, source: sandbox.foreign_addr }, sandbox.host_addr, 18080)
+        tcp(Origin::External { sandbox: &sandbox, source: sandbox.foreign_addr.into() }, sandbox.host_addr, 18080)
             .expect_dropped()
             .await
     }
@@ -88,10 +88,10 @@ e2e! {
         scenario.start_daemon().await?;
         scenario.wait_until_managed(&server).await?;
 
-        tcp(Origin::External { sandbox: &sandbox, source: sandbox.external_addr }, sandbox.host_addr, 18080)
+        tcp(Origin::External { sandbox: &sandbox, source: sandbox.external_addr.into() }, sandbox.host_addr, 18080)
             .expect_connected(&server.name, 8080)
             .await?;
-        tcp(Origin::External { sandbox: &sandbox, source: sandbox.foreign_addr }, sandbox.host_addr, 18080)
+        tcp(Origin::External { sandbox: &sandbox, source: sandbox.foreign_addr.into() }, sandbox.host_addr, 18080)
             .expect_dropped()
             .await
     }
@@ -113,14 +113,14 @@ e2e! {
         tcp(Origin::Localhost, Ipv4Addr::LOCALHOST, 18081)
             .expect_connected(&twin.name, 8080)
             .await?;
-        tcp(Origin::External { sandbox: &sandbox, source: sandbox.external_addr }, sandbox.host_addr, 18081)
+        tcp(Origin::External { sandbox: &sandbox, source: sandbox.external_addr.into() }, sandbox.host_addr, 18081)
             .expect_connected(&twin.name, 8080)
             .await?;
 
         tcp(Origin::Localhost, Ipv4Addr::LOCALHOST, 18080)
             .expect_dropped()
             .await?;
-        tcp(Origin::External { sandbox: &sandbox, source: sandbox.external_addr }, sandbox.host_addr, 18080)
+        tcp(Origin::External { sandbox: &sandbox, source: sandbox.external_addr.into() }, sandbox.host_addr, 18080)
             .expect_dropped()
             .await
     }
@@ -145,10 +145,37 @@ e2e! {
         scenario.start_daemon().await?;
         scenario.wait_until_managed(&server).await?;
 
-        udp(Origin::External { sandbox: &sandbox, source: sandbox.external_addr }, sandbox.host_addr, 15353)
+        udp(Origin::External { sandbox: &sandbox, source: sandbox.external_addr.into() }, sandbox.host_addr, 15353)
             .expect_connected(&server.name, 5353)
             .await?;
-        udp(Origin::External { sandbox: &sandbox, source: sandbox.foreign_addr }, sandbox.host_addr, 15353)
+        udp(Origin::External { sandbox: &sandbox, source: sandbox.foreign_addr.into() }, sandbox.host_addr, 15353)
+            .expect_dropped()
+            .await
+    }
+}
+
+e2e! {
+    /// Published ports reached over IPv6 honour the same allowlist.
+    async fn external_allowlist_applies_over_ipv6(scenario) {
+        let net = scenario.network_ipv6("net6", "fd00:e2e:2::/64").await?;
+        let sandbox = scenario.sandbox.clone();
+        let rules = json!({
+            "mapped_ports": { "external": { "allow": true, "ips": [sandbox.external_addr6.to_string()] } }
+        });
+        let server = scenario
+            .run(ContainerSpec::new(scenario.name("server")).network(&net).publish("18080:8080").rules(rules.to_string()))
+            .await?;
+        scenario.start_daemon().await?;
+        scenario.wait_until_managed(&server).await?;
+
+        tcp(Origin::External { sandbox: &sandbox, source: sandbox.external_addr6.into() }, sandbox.host_addr6, 18080)
+            .expect_connected(&server.name, 8080)
+            .await?;
+        tcp(Origin::External { sandbox: &sandbox, source: sandbox.foreign_addr6.into() }, sandbox.host_addr6, 18080)
+            .expect_dropped()
+            .await?;
+        // The allowlist names only an IPv6 source, so IPv4 gets nothing.
+        tcp(Origin::External { sandbox: &sandbox, source: sandbox.external_addr.into() }, sandbox.host_addr, 18080)
             .expect_dropped()
             .await
     }

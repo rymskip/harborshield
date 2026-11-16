@@ -12,7 +12,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
 
-COPY entrypoint.sh hs-serve hs-probe /usr/local/bin/
+COPY entrypoint.sh hs-dockerd hs-serve hs-probe /usr/local/bin/
 
 ENV HARBORSHIELD_E2E_SANDBOX=1
 

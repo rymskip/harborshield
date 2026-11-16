@@ -49,6 +49,18 @@ enum Commands {
     E2e {
         /// Run only e2e tests whose name contains this filter (skips the privileged unit tests)
         filter: Option<String>,
+
+        /// Docker's firewall backend inside the sandbox
+        #[arg(long, value_enum, default_value_t = FirewallBackend::Iptables)]
+        backend: FirewallBackend,
+
+        /// Run the sandbox's dockerd without docker-proxy
+        #[arg(long)]
+        no_userland_proxy: bool,
+
+        /// Run every backend and proxy combination, reporting all failures at the end
+        #[arg(long, conflicts_with_all = ["backend", "no_userland_proxy"])]
+        matrix: bool,
     },
 
     /// Check code quality (fmt, clippy, test)
@@ -96,7 +108,22 @@ fn main() -> Result<()> {
         Commands::Shell => cmd_shell(),
         Commands::Run { release, watch } => cmd_run(release, watch),
         Commands::Test { unit } => cmd_test(unit),
-        Commands::E2e { filter } => cmd_e2e(filter.as_deref()),
+        Commands::E2e {
+            filter,
+            backend,
+            no_userland_proxy,
+            matrix,
+        } => {
+            let modes = if matrix {
+                SandboxMode::all()
+            } else {
+                vec![SandboxMode {
+                    backend,
+                    userland_proxy: !no_userland_proxy,
+                }]
+            };
+            cmd_e2e(filter.as_deref(), &modes)
+        }
         Commands::Check { fix } => cmd_check(fix),
         Commands::Build { linux } => cmd_build(linux),
         Commands::Stop => cmd_stop(),
@@ -183,9 +210,59 @@ const E2E_SANDBOX_IMAGE: &str = "harborshield-e2e-sandbox";
 const E2E_SANDBOX_LABEL: &str = "harborshield.e2e.sandbox";
 const E2E_DOCKER_VOLUME: &str = "harborshield-e2e-docker";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum FirewallBackend {
+    Iptables,
+    Nftables,
+}
+
+impl FirewallBackend {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Iptables => "iptables",
+            Self::Nftables => "nftables",
+        }
+    }
+}
+
+/// How the sandbox's dockerd manages its firewall and published ports.
+#[derive(Clone, Copy, Debug)]
+struct SandboxMode {
+    backend: FirewallBackend,
+    userland_proxy: bool,
+}
+
+impl SandboxMode {
+    fn all() -> Vec<Self> {
+        [FirewallBackend::Iptables, FirewallBackend::Nftables]
+            .into_iter()
+            .flat_map(|backend| {
+                [true, false].map(|userland_proxy| Self {
+                    backend,
+                    userland_proxy,
+                })
+            })
+            .collect()
+    }
+
+    fn label(self) -> String {
+        let proxy = if self.userland_proxy {
+            "proxy"
+        } else {
+            "no-proxy"
+        };
+        format!("{}-{proxy}", self.backend.as_str())
+    }
+}
+
+/// The last release that kept its rules in Docker's `ip filter` table; the upgrade test runs
+/// it before the current build.
+const LEGACY_REVISION: &str = "1f7e8e2";
+
 /// Build the test binaries on the host, then run them inside a privileged sandbox with its
-/// own dockerd and network namespace, so the suite never touches the host firewall.
-fn cmd_e2e(filter: Option<&str>) -> Result<()> {
+/// own dockerd and network namespace, once per mode, so the suite never touches the host
+/// firewall. Every mode runs even when an earlier one fails.
+fn cmd_e2e(filter: Option<&str>, modes: &[SandboxMode]) -> Result<()> {
     let root = project_root();
     let root_str = root
         .to_str()
@@ -215,6 +292,9 @@ fn cmd_e2e(filter: Option<&str>) -> Result<()> {
     println!("==> Building test binaries...");
     let (unit_exe, e2e_exe) = build_test_binaries()?;
 
+    println!("\n==> Building the previous release ({LEGACY_REVISION}) for the upgrade test...");
+    let legacy_bin = build_legacy_binary(&root)?;
+
     println!("\n==> Building sandbox image...");
     let images = format!("{root_str}/tests/e2e/images");
     run_command(
@@ -231,75 +311,154 @@ fn cmd_e2e(filter: Option<&str>) -> Result<()> {
     )?;
 
     let e2e_dir = root.join("target").join("e2e");
-    let log_dir = e2e_dir.join("logs");
-    if log_dir.exists() {
-        fs::remove_dir_all(&log_dir)
-            .with_context(|| format!("Failed to reset {}", log_dir.display()))?;
+    let logs_root = e2e_dir.join("logs");
+    if logs_root.exists() {
+        fs::remove_dir_all(&logs_root)
+            .with_context(|| format!("Failed to reset {}", logs_root.display()))?;
     }
-    fs::create_dir_all(&log_dir)
-        .with_context(|| format!("Failed to create {}", log_dir.display()))?;
     let e2e_dir = e2e_dir.to_str().context("e2e dir is not UTF-8")?.to_owned();
-    let log_dir = log_dir.to_str().context("log dir is not UTF-8")?.to_owned();
+    let owner = invoking_owner()?;
 
-    // Run the privileged unit tests, then the e2e suite; report failure if either failed.
-    let script = r#"unit=0
+    let mut failed = Vec::new();
+    for mode in modes {
+        let log_dir = logs_root.join(mode.label());
+        fs::create_dir_all(&log_dir)
+            .with_context(|| format!("Failed to create {}", log_dir.display()))?;
+        let log_dir = log_dir.to_str().context("log dir is not UTF-8")?.to_owned();
+
+        // Run the privileged unit tests, then the e2e suite; report failure if either failed.
+        let script = r#"unit=0
 if [ -n "$1" ]; then "$1" --ignored --test-threads=1 || unit=$?; fi
 shift
 "$@" || exit $?
 exit "$unit""#;
-    let unit_arg = if filter.is_some() {
-        String::new()
-    } else {
-        unit_exe
-    };
-    let mut args = vec![
-        "run".to_owned(),
-        "--rm".to_owned(),
-        "--privileged".to_owned(),
-        "--name".to_owned(),
-        format!("harborshield-e2e-{}", std::process::id()),
-        "--label".to_owned(),
-        E2E_SANDBOX_LABEL.to_owned(),
-        // Docker disables IPv6 in containers on IPv4-only networks; the inner dockerd needs it
-        // for the dual-stack scenarios.
-        "--sysctl".to_owned(),
-        "net.ipv6.conf.all.disable_ipv6=0".to_owned(),
-        "--sysctl".to_owned(),
-        "net.ipv6.conf.default.disable_ipv6=0".to_owned(),
-        "--volume".to_owned(),
-        format!("{root_str}:{root_str}:ro"),
-        "--volume".to_owned(),
-        format!("{e2e_dir}:{e2e_dir}"),
-        "--volume".to_owned(),
-        format!("{E2E_DOCKER_VOLUME}:/var/lib/docker"),
-        "--env".to_owned(),
-        format!("HARBORSHIELD_E2E_LOG_DIR={log_dir}"),
-        "--env".to_owned(),
-        format!("HARBORSHIELD_E2E_IMAGES={images}"),
-        "--env".to_owned(),
-        format!("HARBORSHIELD_E2E_OWNER={}", invoking_owner()?),
-        "--env".to_owned(),
-        "RUST_BACKTRACE=1".to_owned(),
-        "--workdir".to_owned(),
-        root_str.clone(),
-        E2E_SANDBOX_IMAGE.to_owned(),
-        "sh".to_owned(),
-        "-c".to_owned(),
-        script.to_owned(),
-        "sh".to_owned(),
-        unit_arg,
-        e2e_exe,
-        "--ignored".to_owned(),
-        "--test-threads=1".to_owned(),
-    ];
-    if let Some(filter) = filter {
-        args.push(filter.to_owned());
+        let unit_arg = if filter.is_some() {
+            String::new()
+        } else {
+            unit_exe.clone()
+        };
+        let mut args = vec![
+            "run".to_owned(),
+            "--rm".to_owned(),
+            "--privileged".to_owned(),
+            "--name".to_owned(),
+            format!("harborshield-e2e-{}", std::process::id()),
+            "--label".to_owned(),
+            E2E_SANDBOX_LABEL.to_owned(),
+            // Docker disables IPv6 in containers on IPv4-only networks; the inner dockerd needs
+            // it for the dual-stack scenarios.
+            "--sysctl".to_owned(),
+            "net.ipv6.conf.all.disable_ipv6=0".to_owned(),
+            "--sysctl".to_owned(),
+            "net.ipv6.conf.default.disable_ipv6=0".to_owned(),
+            "--volume".to_owned(),
+            format!("{root_str}:{root_str}:ro"),
+            "--volume".to_owned(),
+            format!("{e2e_dir}:{e2e_dir}"),
+            "--volume".to_owned(),
+            format!("{E2E_DOCKER_VOLUME}:/var/lib/docker"),
+            "--env".to_owned(),
+            format!("HARBORSHIELD_E2E_LOG_DIR={log_dir}"),
+            "--env".to_owned(),
+            format!("HARBORSHIELD_E2E_IMAGES={images}"),
+            "--env".to_owned(),
+            format!("HARBORSHIELD_E2E_OWNER={owner}"),
+            "--env".to_owned(),
+            format!(
+                "HARBORSHIELD_E2E_FIREWALL_BACKEND={}",
+                mode.backend.as_str()
+            ),
+            "--env".to_owned(),
+            format!("HARBORSHIELD_E2E_USERLAND_PROXY={}", mode.userland_proxy),
+            "--env".to_owned(),
+            format!("HARBORSHIELD_E2E_LEGACY_BIN={legacy_bin}"),
+            "--env".to_owned(),
+            "RUST_BACKTRACE=1".to_owned(),
+            "--workdir".to_owned(),
+            root_str.clone(),
+            E2E_SANDBOX_IMAGE.to_owned(),
+            "sh".to_owned(),
+            "-c".to_owned(),
+            script.to_owned(),
+            "sh".to_owned(),
+            unit_arg,
+            e2e_exe.clone(),
+            "--ignored".to_owned(),
+            "--test-threads=1".to_owned(),
+        ];
+        if let Some(filter) = filter {
+            args.push(filter.to_owned());
+        }
+
+        println!(
+            "\n==> Running in sandbox, {} (logs: {log_dir})...",
+            mode.label()
+        );
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        if let Err(failure) = run_command("docker", &borrowed) {
+            println!("==> {} failed: {failure}", mode.label());
+            failed.push(mode.label());
+        }
     }
 
-    println!("\n==> Running in sandbox (logs: {log_dir})...");
-    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_command("docker", &borrowed)?;
-    Ok(())
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("e2e failed in: {}", failed.join(", "))
+    }
+}
+
+/// Build the previous release from git, cached under target/e2e, and return its binary.
+fn build_legacy_binary(root: &std::path::Path) -> Result<String> {
+    let source = root.join("target").join("e2e").join("legacy-src");
+    let target_dir = root.join("target").join("e2e").join("legacy-target");
+    if !source.join("Cargo.toml").exists() {
+        fs::create_dir_all(&source)
+            .with_context(|| format!("Failed to create {}", source.display()))?;
+        let archive = Command::new("git")
+            .args(["archive", "--format=tar", LEGACY_REVISION])
+            .current_dir(root)
+            .output()
+            .context("Failed to run git archive")?;
+        if !archive.status.success() {
+            anyhow::bail!(
+                "git archive {LEGACY_REVISION} failed: {}",
+                String::from_utf8_lossy(&archive.stderr).trim()
+            );
+        }
+        let mut tar = Command::new("tar")
+            .arg("-x")
+            .arg("-C")
+            .arg(&source)
+            .stdin(Stdio::piped())
+            .spawn()
+            .context("Failed to run tar")?;
+        tar.stdin
+            .take()
+            .context("tar has no stdin")?
+            .write_all(&archive.stdout)
+            .context("Failed to feed the archive to tar")?;
+        let status = tar.wait().context("Failed to wait for tar")?;
+        if !status.success() {
+            anyhow::bail!("tar failed with {status}");
+        }
+    }
+    let status = Command::new("cargo")
+        .args(["build", "--bin", "harborshield"])
+        .current_dir(&source)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env("SQLX_OFFLINE", "true")
+        .status()
+        .context("Failed to build the previous release")?;
+    if !status.success() {
+        anyhow::bail!("building the previous release failed with {status}");
+    }
+    target_dir
+        .join("debug")
+        .join("harborshield")
+        .to_str()
+        .context("legacy binary path is not UTF-8")
+        .map(str::to_owned)
 }
 
 /// `uid:gid` of the user running xtask, so the root sandbox can hand its logs back.

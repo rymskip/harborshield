@@ -4,12 +4,15 @@ The e2e suite runs the real `harborshield` binary against a real Docker daemon a
 firewall, and checks every expectation by sending traffic.
 
 ```sh
-cargo xtask e2e              # whole suite, plus the unit tests that need root
-cargo xtask e2e lifecycle    # only e2e tests whose name contains "lifecycle"
+cargo xtask e2e                           # whole suite, plus the unit tests that need root
+cargo xtask e2e lifecycle                 # only e2e tests whose name contains "lifecycle"
+cargo xtask e2e --backend nftables        # under Docker's nftables firewall backend
+cargo xtask e2e --no-userland-proxy       # with docker-proxy disabled
+cargo xtask e2e --matrix                  # every backend and proxy combination
 ```
 
-Logs land in `target/e2e/logs/<test>/`: each harborshield run's stdout and stderr, plus the
-sandbox's `dockerd.log`.
+Logs land in `target/e2e/logs/<mode>/<test>/`: each harborshield run's stdout and stderr, plus
+the sandbox's `dockerd.log`. CI runs the four modes as a matrix on every pull request.
 
 ## The sandbox
 
@@ -22,15 +25,22 @@ the sandbox image sets, and plain `cargo test` skips them as ignored.
 The inner daemon's images live in the `harborshield-e2e-docker` volume, so only the first run
 pulls. Only one sandbox runs at a time, since the volume cannot be shared by two daemons.
 
+The upgrade test runs the previous release, which kept its rules in Docker's `ip filter`
+table. `cargo xtask e2e` builds it from git (revision `LEGACY_REVISION` in xtask) into
+`target/e2e/legacy-target`, once.
+
 Inside the sandbox:
 
 - **Workload containers** run `harborshield-e2e-fixture`, built from
   `tests/e2e/images/fixture.Dockerfile`. Each serves a banner `hs-e2e <name> <port>` on its
   listeners, so a probe proves which service answered, not just that a port was open.
-- **The external host** is a network namespace, `hs-ext`, behind a veth at `198.18.0.1`. It has
-  two source addresses: `198.18.0.2`, which allowlists in the tests permit, and `198.18.0.3`,
-  which they do not. It also serves banners on TCP 7000/7001 and UDP 7053/7054 for output rules
-  that target addresses outside Docker.
+- **The external host** is a network namespace, `hs-ext`, behind a veth at `198.18.0.1` and
+  `fd00:198:18::1`. It has two source addresses in each family: `198.18.0.2` and
+  `fd00:198:18::2`, which allowlists in the tests permit, and `198.18.0.3` and
+  `fd00:198:18::3`, which they do not. It also serves banners on TCP 7000/7001 and UDP
+  7053/7054 for output rules that target addresses outside Docker.
+- **`hs-dockerd`** starts, stops and restarts the inner dockerd with the run's firewall backend
+  and proxy mode, so a test can restart Docker under harborshield.
 - **Probes** (`hs-probe`) print exactly one verdict: `CONNECTED <banner>`, `REFUSED`,
   `TIMEOUT`, or `SILENT` (a TCP connection opened but no service answered). Anything else,
   such as a missing binary or an unreachable route, fails the test rather than counting as a
@@ -70,20 +80,27 @@ Rules every test follows:
   such as a network joined while running.
 - **Teardown always runs.** `e2e!` wraps each test in a scenario that stops harborshield (and
   requires a clean exit), removes every container and network carrying the scenario's label,
-  runs `harborshield --clear`, and fails if any harborshield state remains. A preflight repairs
+  removes what the test registered with `on_teardown` (tables, namespaces, links), runs
+  `harborshield --clear`, and fails if any harborshield state remains. A preflight repairs
   state left by an interrupted run before the next test starts.
 
 ## Coverage
+
+Every scenario runs in each of the four modes: Docker's iptables and nftables firewall
+backends, each with docker-proxy on and off.
 
 | Area | Tests |
 | --- | --- |
 | Default deny | inbound, outbound, IPv6, several containers at once, an intruder on the same network, unmanaged containers left alone |
 | Output rules | container reference (listed port only, not the reverse direction), address rule, UDP, port range, a target that starts later, scoping to the named network |
-| Mapped ports | localhost only, external only, allowlist, CIDR and range entries, published port without rules, UDP |
-| Verdicts | jump to a user chain, a missing user chain failing closed for that rule only, nfqueue with established queues, log prefixes |
-| Lifecycle | stop and start, `docker stop` staying stopped (also across a daemon restart), removal, pause and unpause, rename, network joined at runtime |
+| Mapped ports | localhost only, external only, allowlist, CIDR and range entries, IPv6 allowlist, published port without rules, UDP |
+| Verdicts | jump to a user chain, a missing user chain failing closed for that rule only, nfqueue without a consumer, a real consumer seeing each established direction, log prefixes |
+| Lifecycle | stop and start, `docker stop` staying stopped (also across a daemon restart), removal, pause and unpause, rename, network joined at runtime, Docker itself restarting |
 | Persistence | containers running before start, rules holding while the daemon is stopped, restart without duplicate rules, crash recovery, `--clear` |
 | Start-up | both tables and their hooked base chains, health endpoints, invalid rules failing closed, removal of the legacy `ip filter` layout |
+| Upgrade | the previous release managing containers, then the current one taking over its data directory |
+| Coexistence | another table's forward drop and input drop still winning, a non-Docker bridge left working |
+| Scale | a burst of 40 containers enforced together, six cycles of churn leaving no state behind |
 | Compose | a three-service stack using compose-local service and network names |
 
 The privileged unit tests (`cargo test --lib -- --ignored`) run in the same sandbox.
@@ -92,6 +109,6 @@ The privileged unit tests (`cargo test --lib -- --ignored`) run in the same sand
 
 - Kernel log output is not observable from inside a network namespace, so log prefixes are
   checked as installed statements rather than as log lines.
-- The external host reaches published ports through DNAT; Docker's `userland-proxy` handles
-  the localhost path, which is the default Docker setup. A daemon with the proxy disabled is
-  not exercised.
+- The sandbox runs one kernel, the host's. The bridge table needs `nf_conntrack_bridge`,
+  which the kernel loads on demand; a kernel without it fails harborshield's first reconcile
+  loudly.

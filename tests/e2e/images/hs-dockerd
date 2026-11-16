@@ -1,0 +1,62 @@
+#!/bin/sh
+# Start, stop or restart the sandbox's dockerd with this run's firewall backend and proxy mode.
+# Usage: hs-dockerd start|stop|restart
+set -eu
+
+pidfile=/run/hs-dockerd.pid
+log="${HARBORSHIELD_E2E_LOG_DIR:?}/dockerd.log"
+
+wait_ready() {
+    pid=$(cat "$pidfile")
+    attempts=0
+    until docker info >/dev/null 2>&1; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            echo "dockerd exited during startup:" >&2
+            tail -n 50 "$log" >&2
+            exit 1
+        fi
+        attempts=$((attempts + 1))
+        if [ "$attempts" -ge 120 ]; then
+            echo "dockerd was not ready after 60s:" >&2
+            tail -n 50 "$log" >&2
+            exit 1
+        fi
+        sleep 0.5
+    done
+}
+
+start() {
+    dockerd \
+        --firewall-backend="${HARBORSHIELD_E2E_FIREWALL_BACKEND:?}" \
+        --userland-proxy="${HARBORSHIELD_E2E_USERLAND_PROXY:?}" \
+        >>"$log" 2>&1 &
+    echo "$!" >"$pidfile"
+    wait_ready
+}
+
+stop() {
+    pid=$(cat "$pidfile")
+    kill -TERM "$pid"
+    attempts=0
+    while kill -0 "$pid" 2>/dev/null; do
+        attempts=$((attempts + 1))
+        if [ "$attempts" -ge 120 ]; then
+            echo "dockerd did not stop within 60s" >&2
+            exit 1
+        fi
+        sleep 0.5
+    done
+}
+
+case "${1:-}" in
+    start) start ;;
+    stop) stop ;;
+    restart)
+        stop
+        start
+        ;;
+    *)
+        echo "usage: hs-dockerd start|stop|restart" >&2
+        exit 64
+        ;;
+esac

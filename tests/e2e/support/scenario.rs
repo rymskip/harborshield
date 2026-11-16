@@ -1,17 +1,15 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use nftables::types::NfFamily;
-
 use tokio::sync::{Mutex, MutexGuard};
 
-use super::daemon::{Daemon, clear};
+use super::daemon::{CURRENT_BINARY, Daemon, clear};
 use super::docker::{
     Container, ContainerSpec, E2E_LABEL, Network, SCENARIO_LABEL, remove_all_e2e_resources,
     remove_scenario_resources,
 };
 use super::failure::{Failure, TestResult};
-use super::nft::{Ruleset, TABLE, nft, ruleset};
+use super::nft::{Ruleset, TABLE, family_keyword, nft, ruleset};
 use super::sandbox::Sandbox;
 use super::time::deadline_in;
 
@@ -28,7 +26,38 @@ pub struct Scenario {
     data_dir: tempfile::TempDir,
     daemon: Option<Daemon>,
     generation: u32,
+    teardown: Vec<Cleanup>,
     _serial: MutexGuard<'static, ()>,
+}
+
+/// Something a test created outside Docker that teardown must remove.
+#[derive(Clone, Debug)]
+pub enum Cleanup {
+    /// An nftables table, by family keyword and name.
+    NftTable {
+        family: &'static str,
+        name: String,
+    },
+    NetworkNamespace(String),
+    Link(String),
+}
+
+impl Cleanup {
+    async fn run(&self) -> TestResult {
+        match self {
+            Self::NftTable { family, name } => nft(&["delete", "table", family, name]).await,
+            Self::NetworkNamespace(name) => {
+                super::command::run_ok("ip", &["netns", "delete", name], CONVERGE_LIMIT)
+                    .await
+                    .map(drop)
+            }
+            Self::Link(name) => {
+                super::command::run_ok("ip", &["link", "delete", name], CONVERGE_LIMIT)
+                    .await
+                    .map(drop)
+            }
+        }
+    }
 }
 
 /// Run `body` in a fresh scenario and always tear it down, reporting the body's failure first
@@ -78,8 +107,14 @@ impl Scenario {
             data_dir,
             daemon: None,
             generation: 0,
+            teardown: Vec::new(),
             _serial: serial,
         })
+    }
+
+    /// This scenario's short unique tag, for names with tight length limits.
+    pub fn tag(&self) -> &str {
+        &self.tag
     }
 
     /// A Docker-unique name for a logical container or network name.
@@ -113,15 +148,36 @@ impl Scenario {
     }
 
     pub async fn start_daemon(&mut self) -> TestResult {
+        self.start_binary(Path::new(CURRENT_BINARY)).await
+    }
+
+    /// Start the previous release, built by `cargo xtask e2e`, on this scenario's data.
+    pub async fn start_legacy_daemon(&mut self) -> TestResult {
+        let binary = std::env::var("HARBORSHIELD_E2E_LEGACY_BIN").map_err(|error| {
+            Failure::context(
+                "HARBORSHIELD_E2E_LEGACY_BIN names the previous release",
+                error,
+            )
+        })?;
+        self.start_binary(Path::new(&binary)).await
+    }
+
+    async fn start_binary(&mut self, binary: &Path) -> TestResult {
         if self.daemon.is_some() {
             return Err(Failure::new(
                 "harborshield is already running in this scenario",
             ));
         }
         self.generation = self.generation.saturating_add(1);
-        let daemon = Daemon::start(self.data_dir.path(), &self.log_dir, self.generation).await?;
+        let daemon =
+            Daemon::start(binary, self.data_dir.path(), &self.log_dir, self.generation).await?;
         self.daemon = Some(daemon);
         Ok(())
+    }
+
+    /// Remove `cleanup`'s object during teardown, after harborshield has stopped.
+    pub fn on_teardown(&mut self, cleanup: Cleanup) {
+        self.teardown.push(cleanup);
     }
 
     pub async fn stop_daemon(&mut self) -> TestResult {
@@ -204,6 +260,11 @@ impl Scenario {
         if let Err(failure) = remove_scenario_resources(&self.tag).await {
             failures.push(format!("remove scenario resources: {failure}"));
         }
+        for cleanup in self.teardown.iter().rev() {
+            if let Err(failure) = cleanup.run().await {
+                failures.push(format!("remove {cleanup:?}: {failure}"));
+            }
+        }
         if let Err(failure) = clear(self.data_dir.path()).await {
             failures.push(format!("harborshield --clear: {failure}"));
         }
@@ -224,8 +285,7 @@ impl Scenario {
     }
 }
 
-/// Everything of harborshield's left in the kernel: its table, and any legacy chains in
-/// Docker's `ip filter` table.
+/// Everything of harborshield's, or of an interrupted test's, left in the kernel.
 fn leftover_state(rules: &Ruleset) -> Vec<String> {
     let mut leftover: Vec<String> = rules
         .tables()
@@ -235,34 +295,41 @@ fn leftover_state(rules: &Ruleset) -> Vec<String> {
     if rules.has_legacy_chain("harborshield") {
         leftover.push("legacy chain ip filter harborshield".to_owned());
     }
+    leftover.extend(rules.legacy_container_chains());
+    leftover.extend(
+        rules
+            .tables_named_with_prefix(TEST_TABLE_PREFIX)
+            .into_iter()
+            .map(|(family, name)| format!("test table {family:?} {name}")),
+    );
     leftover
 }
 
-/// Remove harborshield state an interrupted run left in the kernel, so every scenario starts
-/// from Docker's own ruleset. The removal is checked.
+/// Tables tests create for other firewalls start with this.
+const TEST_TABLE_PREFIX: &str = "e2e_";
+/// Namespaces and links tests create outside Docker start with these.
+const TEST_NETNS_PREFIX: &str = "hsn-";
+const TEST_LINK_PREFIXES: [&str; 2] = ["hsb-", "hsv-"];
+
+/// Remove harborshield and test state an interrupted run left behind, so every scenario
+/// starts from Docker's own ruleset. Every removal is checked.
 async fn repair_leftover_firewall_state() -> TestResult {
+    remove_test_network_objects().await?;
     let rules = ruleset().await?;
     let leftover = leftover_state(&rules);
     if leftover.is_empty() {
         return Ok(());
     }
-    eprintln!("repairing firewall state left by an earlier run: {leftover:?}");
+    eprintln!("repairing state left by an earlier run: {leftover:?}");
     for family in rules.tables() {
-        let family = match family {
-            NfFamily::INet => "inet",
-            NfFamily::Bridge => "bridge",
-            other => {
-                return Err(Failure::new(format!(
-                    "unexpected {other:?} table named {TABLE}"
-                )));
-            }
-        };
-        nft(&["delete", "table", family, TABLE]).await?;
+        nft(&["delete", "table", family_keyword(family), TABLE]).await?;
     }
-    if rules.has_legacy_chain("harborshield") {
-        return Err(Failure::new(
-            "a legacy ip filter harborshield chain is present; only the legacy-cleanup test creates one and its teardown removes it",
-        ));
+    for (family, name) in rules.tables_named_with_prefix(TEST_TABLE_PREFIX) {
+        nft(&["delete", "table", family_keyword(family), &name]).await?;
+    }
+    if rules.has_legacy_chain("harborshield") || !rules.legacy_container_chains().is_empty() {
+        // `--clear` removes the legacy layout, jumps included.
+        clear_legacy_layout().await?;
     }
     let after = leftover_state(&ruleset().await?);
     if after.is_empty() {
@@ -272,4 +339,36 @@ async fn repair_leftover_firewall_state() -> TestResult {
             "leftover state survived repair: {after:?}"
         )))
     }
+}
+
+async fn clear_legacy_layout() -> TestResult {
+    let scratch =
+        tempfile::tempdir().map_err(|error| Failure::context("create scratch data dir", error))?;
+    clear(scratch.path()).await
+}
+
+async fn remove_test_network_objects() -> TestResult {
+    let limit = CONVERGE_LIMIT;
+    let namespaces = super::command::run_ok("ip", &["netns", "list"], limit).await?;
+    for namespace in namespaces
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|name| name.starts_with(TEST_NETNS_PREFIX))
+    {
+        super::command::run_ok("ip", &["netns", "delete", namespace], limit).await?;
+    }
+    let links = super::command::run_ok("ip", &["-o", "link", "show"], limit).await?;
+    for link in links
+        .lines()
+        .filter_map(|line| line.split(": ").nth(1))
+        .map(|name| name.split('@').next().unwrap_or(name))
+        .filter(|name| {
+            TEST_LINK_PREFIXES
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+        })
+    {
+        super::command::run_ok("ip", &["link", "delete", link], limit).await?;
+    }
+    Ok(())
 }

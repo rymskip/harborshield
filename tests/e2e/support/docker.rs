@@ -86,6 +86,7 @@ pub struct ContainerSpec {
     labels: Vec<(String, String)>,
     publish: Vec<String>,
     listeners: Vec<Listener>,
+    restart_always: bool,
 }
 
 impl ContainerSpec {
@@ -96,7 +97,14 @@ impl ContainerSpec {
             labels: Vec::new(),
             publish: Vec::new(),
             listeners: Vec::new(),
+            restart_always: false,
         }
+    }
+
+    /// Have Docker start the container again whenever its daemon starts.
+    pub fn restart_always(mut self) -> Self {
+        self.restart_always = true;
+        self
     }
 
     pub fn network(mut self, network: &Network) -> Self {
@@ -157,6 +165,10 @@ impl ContainerSpec {
         for network in &self.networks {
             args.push("--network".into());
             args.push(network.clone());
+        }
+        if self.restart_always {
+            args.push("--restart".into());
+            args.push("always".into());
         }
         for mapping in &self.publish {
             args.push("--publish".into());

@@ -205,3 +205,31 @@ e2e! {
             .await
     }
 }
+
+e2e! {
+    /// Allowed traffic flows over IPv6 too, between two managed containers, while everything
+    /// else stays dropped. Neighbour discovery must work for any of it to.
+    async fn container_rule_admits_traffic_over_ipv6(scenario) {
+        let net = scenario.network_ipv6("net6", "fd00:e2e:3::/64").await?;
+        let server_name = scenario.name("server");
+        let server = scenario.run(ContainerSpec::new(&server_name).network(&net).managed()).await?;
+        let rules = json!({
+            "output": [{ "container": server_name, "network": net.name, "proto": "tcp", "dst_ports": [8080] }]
+        });
+        let client = scenario
+            .run(ContainerSpec::new(scenario.name("client")).network(&net).rules(rules.to_string()))
+            .await?;
+        let intruder = scenario.run(ContainerSpec::new(scenario.name("intruder")).network(&net)).await?;
+        scenario.start_daemon().await?;
+        scenario.wait_until_managed(&server).await?;
+        scenario.wait_until_managed(&client).await?;
+
+        let server_ip6 = server.ip6_on(&net).await?;
+        tcp(Origin::Container(&client.name), server_ip6, 8080)
+            .expect_connected(&server.name, 8080)
+            .await?;
+        tcp(Origin::Container(&intruder.name), server_ip6, 8080)
+            .expect_dropped()
+            .await
+    }
+}
